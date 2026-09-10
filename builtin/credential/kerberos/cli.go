@@ -86,7 +86,12 @@ func (h *CLIHandler) Auth(c *api.Client, m map[string]string, nonInteractive boo
 
 	path := fmt.Sprintf("auth/%s/login", mount)
 
-	secret, err := c.Logical().Write(path, nil)
+	var body map[string]interface{}
+	if role := m["role"]; role != "" {
+		body = map[string]interface{}{"role": role}
+	}
+
+	secret, err := c.Logical().Write(path, body)
 	if err != nil {
 		return nil, err
 	}
@@ -100,8 +105,9 @@ func (h *CLIHandler) Help() string {
 	help := `
 Usage: bao login -method=kerberos [CONFIG K=V...]
 
-  The Kerberos auth method allows users to authenticate using Kerberos
-  combined with LDAP.
+  The Kerberos auth method allows users to authenticate using Kerberos,
+  resolving policies either through LDAP group membership or through
+  roles bound to Kerberos principals.
 
   Example authentication:
 
@@ -134,6 +140,11 @@ Configuration:
 
   remove_instance_name=<bool>
       When set to true, strips instance names from the principal name in the keytab file.
+
+  role=<string>
+      Optional role to log in with when the auth method resolves policies
+      through roles instead of LDAP. Without it exactly one role must match
+      the principal.
 `
 
 	return strings.TrimSpace(help)

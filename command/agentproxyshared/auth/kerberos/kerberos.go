@@ -21,6 +21,7 @@ type kerberosMethod struct {
 	logger    hclog.Logger
 	mountPath string
 	loginCfg  *kerberos.LoginCfg
+	role      string
 }
 
 func NewKerberosAuthMethod(conf *auth.AuthConfig) (auth.AuthMethod, error) {
@@ -60,9 +61,18 @@ func NewKerberosAuthMethod(conf *auth.AuthConfig) (auth.AuthMethod, error) {
 		}
 	}
 
+	role := ""
+	if roleRaw, ok := conf.Config["role"]; ok {
+		role, ok = roleRaw.(string)
+		if !ok {
+			return nil, errors.New("could not convert 'role' config value to string")
+		}
+	}
+
 	return &kerberosMethod{
 		logger:    conf.Logger,
 		mountPath: conf.MountPath,
+		role:      role,
 		loginCfg: &kerberos.LoginCfg{
 			Username:               username,
 			Service:                service,
@@ -83,7 +93,11 @@ func (k *kerberosMethod) Authenticate(context.Context, *api.Client) (string, htt
 	var header http.Header
 	header = make(map[string][]string)
 	header.Set(spnego.HTTPHeaderAuthRequest, authHeaderVal)
-	return k.mountPath + "/login", header, make(map[string]interface{}), nil
+	data := map[string]interface{}{}
+	if k.role != "" {
+		data["role"] = k.role
+	}
+	return k.mountPath + "/login", header, data, nil
 }
 
 // These functions are implemented to meet the AuthHandler interface,

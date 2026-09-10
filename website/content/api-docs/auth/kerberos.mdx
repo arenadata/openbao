@@ -13,8 +13,10 @@ This documentation assumes the Kerberos auth method is mounted at the
 `auth/kerberos` path in OpenBao. Since it is possible to enable auth methods at
 any location, please update your API calls accordingly.
 
-The Kerberos auth method validates both Kerberos and LDAP authorization,
-so both configurations are required.
+The Kerberos auth method validates the SPNEGO token and then resolves
+policies either through LDAP group membership (`config/ldap` plus `groups/`)
+or, when `config/ldap` is not set, through [roles](#roles) bound to Kerberos
+principals. One of the two has to be configured.
 
 ## Configure OpenBao Kerberos
 
@@ -29,8 +31,9 @@ for verifying inbound SPNEGO tokens.
   of the Kerberos keytab that will be used for verifying inbound SPNEGO tokens.
   It should contain an entry matching the service account given. This can be
   created through the following command: `$ base64 openbao.keytab > openbao.keytab.base64`.
-- `service_account` `(string: <required>)` – The service account associated
-  with both the keytab entry and an LDAP service account created for OpenBao. Ex.:
+- `service_account` `(string: <required>)` – The account owning the keytab
+  entry, and the service principal clients request tickets for. With LDAP
+  configured it is also the LDAP service account created for OpenBao. Ex.:
   `"openbao_svc"`.
 - `remove_instance_name` - Removes any instance names from a Kerberos service
   principal name when parsing the keytab file. For example when this is set to true,
@@ -234,6 +237,24 @@ $ curl \
 }
 ```
 
+## Delete Kerberos LDAP configuration
+
+This endpoint removes the LDAP configuration. Logins then resolve policies
+through [roles](#roles).
+
+| Method   | Path                         |
+| :------- | :--------------------------- |
+| `DELETE` | `/auth/kerberos/config/ldap` |
+
+### Sample request
+
+```shell-session
+$ curl \
+    --header "X-Vault-Token: ..." \
+    --request DELETE \
+    http://127.0.0.1:8200/v1/auth/kerberos/config/ldap
+```
+
 ## List Kerberos LDAP groups
 
 This endpoint returns a list of existing LDAP groups in the Kerberos auth method.
@@ -362,6 +383,141 @@ $ curl \
     http://127.0.0.1:8200/v1/auth/kerberos/groups/admins
 ```
 
+## Roles
+
+Roles bind Kerberos principals to token parameters without LDAP. They are
+consulted only while `config/ldap` is not set. At login exactly one role must
+match the authenticated principal; see [Login with Kerberos](#login-with-kerberos).
+
+### List roles
+
+| Method | Path                   |
+| :----- | :--------------------- |
+| `LIST` | `/auth/kerberos/roles` |
+
+#### Parameters
+
+ - `after` `(string: "")` - Optional entry to begin listing after for
+   pagination; not required to exist.
+
+ - `limit` `(int: 0)` - Optional number of entries to return; defaults
+   to all entries.
+
+#### Sample request
+
+```shell-session
+$ curl \
+    --header "X-Vault-Token: ..." \
+    --request LIST \
+    http://127.0.0.1:8200/v1/auth/kerberos/roles
+```
+
+#### Sample response
+
+```json
+{
+  "data": {
+    "keys": ["hadoop", "operators"]
+  }
+}
+```
+
+### Read role
+
+| Method | Path                         |
+| :----- | :--------------------------- |
+| `GET`  | `/auth/kerberos/roles/:name` |
+
+#### Parameters
+
+- `name` `(string: <required>)` – The name of the role.
+
+#### Sample request
+
+```shell-session
+$ curl \
+    --header "X-Vault-Token: ..." \
+    http://127.0.0.1:8200/v1/auth/kerberos/roles/hadoop
+```
+
+#### Sample response
+
+```json
+{
+  "data": {
+    "bound_principals": ["hadoop/*@MATRIX.LAN", "nn/*@MATRIX.LAN"],
+    "token_bound_cidrs": [],
+    "token_explicit_max_ttl": 0,
+    "token_max_ttl": 0,
+    "token_no_default_policy": false,
+    "token_num_uses": 0,
+    "token_period": 0,
+    "token_policies": ["hadoop-keys"],
+    "token_strictly_bind_ip": false,
+    "token_ttl": 3600,
+    "token_type": "default"
+  }
+}
+```
+
+### Create/Update role
+
+| Method | Path                         |
+| :----- | :--------------------------- |
+| `POST` | `/auth/kerberos/roles/:name` |
+
+#### Parameters
+
+- `name` `(string: <required>)` – The name of the role.
+- `bound_principals` `(array: <required>)` – Patterns matched against the
+  full principal name `primary/instance@REALM`. `*` matches any characters;
+  the rest is compared literally and case-sensitively. Any match is sufficient.
+  Empty entries are dropped.
+
+@include 'tokenfields.mdx'
+
+Only the `token_*` parameter names are accepted; the deprecated `policies`
+alias is not. `token_period` may not exceed the mount's maximum lease TTL.
+
+#### Sample payload
+
+```json
+{
+  "bound_principals": "hadoop/*@MATRIX.LAN,nn/*@MATRIX.LAN",
+  "token_policies": "hadoop-keys",
+  "token_ttl": "1h"
+}
+```
+
+#### Sample request
+
+```shell-session
+$ curl \
+    --header "X-Vault-Token: ..." \
+    --request POST \
+    --data @payload.json \
+    http://127.0.0.1:8200/v1/auth/kerberos/roles/hadoop
+```
+
+### Delete role
+
+| Method   | Path                         |
+| :------- | :--------------------------- |
+| `DELETE` | `/auth/kerberos/roles/:name` |
+
+#### Parameters
+
+- `name` `(string: <required>)` – The name of the role.
+
+#### Sample request
+
+```shell-session
+$ curl \
+    --header "X-Vault-Token: ..." \
+    --request DELETE \
+    http://127.0.0.1:8200/v1/auth/kerberos/roles/hadoop
+```
+
 ## Login with Kerberos
 
 This endpoint allows you to log in with a valid Kerberos SPNEGO
@@ -404,6 +560,18 @@ sWw
 | Method | Path                   |
 | :----- | :--------------------- |
 | `POST` | `/auth/kerberos/login` |
+
+### Parameters
+
+- `role` `(string: "")` – Optional. Accepted only when policies are resolved
+  through roles (no `config/ldap`); otherwise the request is rejected.
+  Restricts the login to the named role. Without it every role is matched and
+  exactly one must match; no match, or several matches, returns a 403 naming
+  the candidate roles. The response reports the role used in the `role`
+  metadata field and the entity alias is the full principal
+  `primary/instance@REALM`. The role's `token_bound_cidrs` are enforced at
+  login. Tokens issued from roles are renewable; tokens issued through LDAP
+  are not.
 
 ### Sample request
 

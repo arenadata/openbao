@@ -47,8 +47,11 @@ func Backend() *backend {
 				b.pathLogin(),
 				b.pathGroups(),
 				b.pathGroupsList(),
+				b.pathRoles(),
+				b.pathRolesList(),
 			},
 		),
+		AuthRenew: b.pathLoginRenew,
 	}
 
 	return b
@@ -73,4 +76,7 @@ func (b *backend) config(ctx context.Context, s logical.Storage) (*kerberosConfi
 
 var backendHelp string = `
 The Kerberos Auth Backend allows authentication via Kerberos SPNEGO.
+Policies are resolved either from LDAP group membership ("config/ldap" and
+"groups/") or, when LDAP is not configured, from roles binding Kerberos
+principals directly ("roles/").
 `

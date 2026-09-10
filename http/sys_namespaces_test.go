@@ -51,7 +51,7 @@ func FuzzNamespaceName(f *testing.F) {
 		switch {
 		// exact values
 		case name == "..":
-			expect = http.StatusNotFound
+			expect = http.StatusBadRequest
 		case name == ".":
 			expect = http.StatusMethodNotAllowed
 		case name == "":

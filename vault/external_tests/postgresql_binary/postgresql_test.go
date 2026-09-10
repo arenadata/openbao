@@ -31,7 +31,7 @@ func TestPostgreSQL_FencedWrites(t *testing.T) {
 		ImageRepo: "quay.io/openbao/openbao",
 		// We're replacing the binary anyway, so we're not too particular about
 		// the docker image version tag.
-		ImageTag:    "latest",
+		ImageTag:    "2.5.5",
 		NetworkName: "",
 		VaultBinary: binary,
 		ClusterOptions: testcluster.ClusterOptions{
@@ -152,7 +152,7 @@ func TestPostgreSQL_ParallelInit(t *testing.T) {
 
 	opts := &docker.DockerClusterOptions{
 		ImageRepo:   "quay.io/openbao/openbao",
-		ImageTag:    "latest",
+		ImageTag:    "2.5.5",
 		VaultBinary: binary,
 		CopyFromTo: map[string]string{
 			"../../../command/server/test-fixtures/self-init.hcl":   "/openbao/config/self-init.hcl",
@@ -221,7 +221,7 @@ func TestPostgreSQL_FatalInit(t *testing.T) {
 
 	opts := &docker.DockerClusterOptions{
 		ImageRepo:   "quay.io/openbao/openbao",
-		ImageTag:    "latest",
+		ImageTag:    "2.5.5",
 		VaultBinary: binary,
 		CopyFromTo: map[string]string{
 			"../../../command/server/test-fixtures/self-init.hcl":         "/openbao/config/self-init.hcl",

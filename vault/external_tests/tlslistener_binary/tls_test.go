@@ -39,7 +39,7 @@ func TestTLSListener_SelfHostedNonStandard(t *testing.T) {
 		ImageRepo: "quay.io/openbao/openbao",
 		// We're replacing the binary anyway, so we're not too particular about
 		// the docker image version tag.
-		ImageTag:    "latest",
+		ImageTag:    "2.5.5",
 		VaultBinary: binary,
 
 		// We need root here to temporarily bind to port 80.
@@ -106,7 +106,7 @@ func TestTLSListener_SelfHostedPrivileged(t *testing.T) {
 		ImageRepo: "quay.io/openbao/openbao",
 		// We're replacing the binary anyway, so we're not too particular about
 		// the docker image version tag.
-		ImageTag:    "latest",
+		ImageTag:    "2.5.5",
 		VaultBinary: binary,
 		Root:        true,
 		Entrypoint:  entrypointPath(t),
@@ -169,7 +169,7 @@ func TestTLSListener_ALPN(t *testing.T) {
 		ImageRepo: "quay.io/openbao/openbao",
 		// We're replacing the binary anyway, so we're not too particular about
 		// the docker image version tag.
-		ImageTag:    "latest",
+		ImageTag:    "2.5.5",
 		VaultBinary: binary,
 		Root:        true,
 		Entrypoint:  entrypointPath(t),

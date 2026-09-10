@@ -961,7 +961,7 @@ type DockerClusterOptions struct {
 func DefaultOptions(t *testing.T) *DockerClusterOptions {
 	return &DockerClusterOptions{
 		ImageRepo:   "quay.io/openbao/openbao",
-		ImageTag:    "latest",
+		ImageTag:    "2.5.5",
 		VaultBinary: api.ReadBaoVariable("BAO_BINARY"),
 		ClusterOptions: testcluster.ClusterOptions{
 			NumCores:    3,
@@ -1140,7 +1140,7 @@ func (dc *DockerCluster) setupImage(ctx context.Context, opts *DockerClusterOpti
 	}
 	sourceTag := opts.ImageTag
 	if sourceTag == "" {
-		sourceTag = "latest"
+		sourceTag = "2.5.5"
 	}
 
 	if opts.VaultBinary == "" {

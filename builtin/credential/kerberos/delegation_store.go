@@ -218,7 +218,7 @@ func delegationExpiry(now time.Time, cfg *delegationConfig, id *delegationTokenI
 // verifyDelegationToken checks a presented token against the signing key
 // and the stored record as of now. A valid signature alone is not enough:
 // the record must exist and match, which is what makes cancel and expiry
-// effective. A nil identifier comes with the response to return.
+// effective. On failure the response and error to return are set.
 func (b *backend) verifyDelegationToken(ctx context.Context, s logical.Storage, cfg *delegationConfig, urlString string, now time.Time) (*delegationTokenIdentifier, *delegationTokenEntry, *logical.Response, error) {
 	tok, err := decodeURLString(urlString)
 	if err != nil {

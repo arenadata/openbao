@@ -127,7 +127,7 @@ func (b *backend) pathLoginUpdate(ctx context.Context, req *logical.Request, d *
 	}
 
 	identity, resp, err := b.negotiate(ctx, req, d, kerbCfg)
-	if identity == nil {
+	if err != nil || resp != nil {
 		return resp, err
 	}
 
@@ -154,8 +154,8 @@ func (b *backend) pathLoginUpdate(ctx context.Context, req *logical.Request, d *
 
 // negotiate verifies the SPNEGO token from the Authorization header or the
 // authorization field. Without a Negotiate token it answers with the 401
-// challenge; on failure the response carries the SPNEGO status. A nil
-// identity means the response and error are to be returned as is.
+// challenge; on failure the response carries the SPNEGO status and the
+// response and error are to be returned as is.
 func (b *backend) negotiate(ctx context.Context, req *logical.Request, d *framework.FieldData, kerbCfg *kerberosConfig) (goidentity.Identity, *logical.Response, error) {
 	authorizationString := authorizationValue(req, d)
 	if !isNegotiate(authorizationString) {
@@ -419,7 +419,7 @@ func (b *backend) loginWithRoles(ctx context.Context, req *logical.Request, iden
 	principal := fullPrincipal(identity)
 
 	role, resp, err := b.selectRole(ctx, req.Storage, principal, roleName)
-	if role == nil {
+	if err != nil || resp != nil {
 		return resp, err
 	}
 
@@ -446,13 +446,13 @@ func (b *backend) loginWithRoles(ctx context.Context, req *logical.Request, iden
 // the issued OpenBao token.
 func (b *backend) loginWithDelegationToken(ctx context.Context, req *logical.Request, urlString string) (*logical.Response, error) {
 	cfg, resp, err := b.delegationEnabled(ctx, req)
-	if cfg == nil {
+	if err != nil || resp != nil {
 		return resp, err
 	}
 
 	now := b.now()
 	id, entry, resp, err := b.verifyDelegationToken(ctx, req.Storage, cfg, urlString, now)
-	if id == nil {
+	if err != nil || resp != nil {
 		return resp, err
 	}
 

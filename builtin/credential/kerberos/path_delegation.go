@@ -91,8 +91,8 @@ func (b *backend) delegationPath(name, verb, synopsis string, callback framework
 
 // delegationCaller authenticates a delegation endpoint call: the caller must
 // present a SPNEGO token, then delegation tokens must be enabled with
-// policies coming from roles. A nil identity comes with the response to
-// return.
+// policies coming from roles. On failure the response and error to return
+// are set.
 func (b *backend) delegationCaller(ctx context.Context, req *logical.Request, d *framework.FieldData) (goidentity.Identity, *delegationConfig, *logical.Response, error) {
 	kerbCfg, err := b.config(ctx, req.Storage)
 	if err != nil {
@@ -103,12 +103,12 @@ func (b *backend) delegationCaller(ctx context.Context, req *logical.Request, d 
 	}
 
 	identity, resp, err := b.negotiate(ctx, req, d, kerbCfg)
-	if identity == nil {
+	if err != nil || resp != nil {
 		return nil, nil, resp, err
 	}
 
 	cfg, resp, err := b.delegationEnabled(ctx, req)
-	if cfg == nil {
+	if err != nil || resp != nil {
 		return nil, nil, resp, err
 	}
 	return identity, cfg, nil, nil
@@ -141,13 +141,13 @@ func (b *backend) pathDelegationTokenUpdate(ctx context.Context, req *logical.Re
 	}
 
 	identity, _, resp, err := b.delegationCaller(ctx, req, d)
-	if identity == nil {
+	if err != nil || resp != nil {
 		return resp, err
 	}
 
 	principal := fullPrincipal(identity)
 	role, resp, err := b.selectRole(ctx, req.Storage, principal, roleName)
-	if role == nil {
+	if err != nil || resp != nil {
 		return resp, err
 	}
 	if err := checkBoundCIDRs(b, req, role.TokenBoundCIDRs); err != nil {
@@ -170,7 +170,7 @@ func (b *backend) pathDelegationTokenUpdate(ctx context.Context, req *logical.Re
 	// Re-read under the lock: a concurrent delete of the configuration must
 	// not be followed by an issuance that recreates the purged records.
 	cfg, resp, err := b.delegationEnabled(ctx, req)
-	if cfg == nil {
+	if err != nil || resp != nil {
 		return resp, err
 	}
 
@@ -202,7 +202,7 @@ func (b *backend) pathDelegationTokenUpdate(ctx context.Context, req *logical.Re
 
 func (b *backend) pathDelegationRenewUpdate(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	identity, cfg, resp, err := b.delegationCaller(ctx, req, d)
-	if identity == nil {
+	if err != nil || resp != nil {
 		return resp, err
 	}
 
@@ -211,7 +211,7 @@ func (b *backend) pathDelegationRenewUpdate(ctx context.Context, req *logical.Re
 
 	now := b.now()
 	id, entry, resp, err := b.verifyDelegationToken(ctx, req.Storage, cfg, d.Get("token").(string), now)
-	if id == nil {
+	if err != nil || resp != nil {
 		return resp, err
 	}
 	if id.Renewer == "" {
@@ -238,7 +238,7 @@ func (b *backend) pathDelegationRenewUpdate(ctx context.Context, req *logical.Re
 
 func (b *backend) pathDelegationCancelUpdate(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	identity, cfg, resp, err := b.delegationCaller(ctx, req, d)
-	if identity == nil {
+	if err != nil || resp != nil {
 		return resp, err
 	}
 
@@ -246,7 +246,7 @@ func (b *backend) pathDelegationCancelUpdate(ctx context.Context, req *logical.R
 	defer b.delegationLock.Unlock()
 
 	id, _, resp, err := b.verifyDelegationToken(ctx, req.Storage, cfg, d.Get("token").(string), b.now())
-	if id == nil {
+	if err != nil || resp != nil {
 		return resp, err
 	}
 	if fullPrincipal(identity) != id.Owner && (id.Renewer == "" || !renewerMatches(identity, id)) {

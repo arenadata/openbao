@@ -129,6 +129,45 @@ The above group grants the "engineers" policy to those who authenticate
 via Kerberos and are found to be members of the "engineering-team" LDAP
 group.
 
+## Configuration without LDAP
+
+When the entities logging in are service principals rather than directory
+users, LDAP adds nothing: Kerberos already proves the principal name. In that
+case skip `config/ldap` and bind principals to policies directly with roles.
+Roles are consulted only while `config/ldap` is not set; writing an LDAP
+configuration switches the mount to group based resolution, deleting it
+(`bao delete auth/kerberos/config/ldap`) switches back.
+
+```shell-session
+$ bao write auth/kerberos/roles/hadoop \
+    bound_principals="hadoop/*@MATRIX.LAN,nn/*@MATRIX.LAN" \
+    token_policies=hadoop-keys \
+    token_ttl=1h
+```
+
+- `bound_principals` is a comma-separated list of patterns matched against the
+  full principal name, `primary/instance@REALM`. `*` matches any characters,
+  including `/` and `@`; everything else is compared literally and
+  case-sensitively. At least one entry is required.
+- The usual [token parameters](/api-docs/auth/kerberos#createupdate-role)
+  (`token_policies`, `token_ttl`, `token_bound_cidrs`, ...) are available on
+  the role.
+
+At login the authenticated principal is matched against every role, or only
+against the role named by the `role` parameter. Exactly one role must match:
+no match, or several matches without a `role`, returns a 403 naming the
+candidates. The token carries that role's policies and parameters, the
+`role` metadata field names it, and `token_bound_cidrs` of the role is
+enforced at login. The entity alias is the full principal, so the same name
+in two realms stays two identities. Tokens issued from roles are renewable
+as long as the role still exists and still binds the principal.
+`remove_instance_name` does not affect matching: patterns always see the full
+principal.
+
+The `service_account` in `config` still has to own the service principal the
+client asks a ticket for (usually `HTTP/<openbao-host>`), and the keytab has
+to hold that account's key with the current KVNO.
+
 ## Authentication
 
 From a client machine with a valid `krb5.conf` and `keytab`, perform a command
@@ -150,11 +189,14 @@ $ bao login -method=kerberos \
   entity authenticating to OpenBao. Keytab files should be protected from other
   users on a shared server using appropriate file permissions.
 - `username` is the username for the entry _within_ the `keytab` to use for
-  logging into Kerberos. This username must match a service account in LDAP.
+  logging into Kerberos. With LDAP configured this username must match a
+  service account in LDAP.
 - `service` is the service principal name to use in obtaining a service ticket for
-  gaining a SPNEGO token. This service must exist in LDAP.
-- `realm` is the name of the Kerberos realm. This realm must match the UPNDomain
-  configured on the LDAP connection. This check is case-sensitive.
+  gaining a SPNEGO token. It must belong to the `service_account` configured on
+  the auth method.
+- `realm` is the name of the Kerberos realm. With LDAP configured this realm
+  must match the UPNDomain configured on the LDAP connection. This check is
+  case-sensitive.
 - `disable_fast_negotiation` is for disabling the Kerberos auth method's default
   of using FAST negotiation. FAST is a pre-authentication framework for Kerberos.
   It includes a mechanism for tunneling pre-authentication exchanges using armoured
@@ -164,6 +206,9 @@ $ bao login -method=kerberos \
   principal name when parsing the keytab file. For example when this is set to true,
   if a keytab has the service principal name `foo/localhost@example.com`, the CLI
   will strip the service principal name to just be `foo@example.com`.
+- `role` is optional and only accepted when the auth method resolves policies
+  through roles instead of LDAP. It restricts the login to the named role;
+  without it exactly one role must match the principal.
 
 ## Troubleshooting
 

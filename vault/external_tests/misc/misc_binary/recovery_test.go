@@ -34,7 +34,7 @@ func TestRecovery_Docker(t *testing.T) {
 		ImageRepo: "quay.io/openbao/openbao",
 		// We're replacing the binary anyway, so we're not too particular about
 		// the docker image version tag.
-		ImageTag:    "latest",
+		ImageTag:    "2.5.5",
 		VaultBinary: binary,
 		ClusterOptions: testcluster.ClusterOptions{
 			NumCores: 1,

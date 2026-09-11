@@ -136,7 +136,7 @@ func prepareTestContainer(t *testing.T) (func(), *DockerVaultConfig) {
 	runner, err := docker.NewServiceRunner(docker.RunOptions{
 		ContainerName: "vault",
 		ImageRepo:     "quay.io/openbao/openbao",
-		ImageTag:      "latest",
+		ImageTag:      "2.5.5",
 		Cmd: []string{
 			"server", "-log-level=trace", "-dev", fmt.Sprintf("-dev-root-token-id=%s", rootToken),
 			"-dev-listen-address=0.0.0.0:8200",

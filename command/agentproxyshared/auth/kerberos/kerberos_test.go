@@ -69,6 +69,25 @@ func TestNewKerberosAuthMethod(t *testing.T) {
 	if actual := authMethod.(*kerberosMethod).loginCfg.DisableFASTNegotiation; !actual {
 		t.Fatalf("disable_fast_negotiation should be true, it wasn't: %t", actual)
 	}
+
+	// Role is optional and passed through verbatim
+	if actual := authMethod.(*kerberosMethod).role; actual != "" {
+		t.Fatalf("role should be empty by default, got %q", actual)
+	}
+
+	authConfig.Config["role"] = "hadoop"
+	authMethod, err = NewKerberosAuthMethod(authConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actual := authMethod.(*kerberosMethod).role; actual != "hadoop" {
+		t.Fatalf("role should be hadoop, got %q", actual)
+	}
+
+	authConfig.Config["role"] = 42
+	if _, err := NewKerberosAuthMethod(authConfig); err == nil {
+		t.Fatal("err should be returned for non-string role")
+	}
 }
 
 func simpleAuthConfig() *auth.AuthConfig {

@@ -36,6 +36,13 @@ func (b *backend) pathConfigLdap() *framework.Path {
 					OperationSuffix: "ldap",
 				},
 			},
+			logical.DeleteOperation: &framework.PathOperation{
+				Callback: b.pathConfigLdapDelete,
+				DisplayAttrs: &framework.DisplayAttributes{
+					OperationVerb:   "delete",
+					OperationSuffix: "ldap-configuration",
+				},
+			},
 		},
 		HelpSynopsis:    pathConfigLdapHelpSyn,
 		HelpDescription: pathConfigLdapHelpDesc,
@@ -128,6 +135,10 @@ func (b *backend) pathConfigLdapWrite(ctx context.Context, req *logical.Request,
 	return nil, nil
 }
 
+func (b *backend) pathConfigLdapDelete(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	return nil, req.Storage.Delete(ctx, ldapConfPath)
+}
+
 type ldapConfigEntry struct {
 	tokenutil.TokenParams
 	*ldaputil.ConfigEntry
@@ -139,7 +150,8 @@ Configure the LDAP server to connect to, along with its options.
 
 const pathConfigLdapHelpDesc = `
 This endpoint allows you to configure the LDAP server to connect to and its
-configuration options.
+configuration options. Deleting the configuration switches the mount to
+resolving policies from "roles/".
 
 The LDAP URL can use either the "ldap://" or "ldaps://" schema. In the former
 case, an unencrypted connection will be made with a default port of 389, unless

@@ -2845,96 +2845,96 @@ func initDevCore(c *ServerCommand, coreConfig *vault.CoreConfig, config *server.
 			sort.Strings(plugins)
 		}
 
-		var qw *quiescenceSink
+		// The timer callback reads qw, so it must be armed only after the
+		// sink is assigned.
 		var qwo sync.Once
-		qw = &quiescenceSink{
-			t: time.AfterFunc(100*time.Millisecond, func() {
-				qwo.Do(func() {
-					c.logger.DeregisterSink(qw)
+		qw := &quiescenceSink{}
+		qw.t = time.AfterFunc(100*time.Millisecond, func() {
+			qwo.Do(func() {
+				c.logger.DeregisterSink(qw)
 
-					// Print the big dev mode warning!
-					c.UI.Warn(wrapAtLength(
-						"WARNING! dev mode is enabled! In this mode, OpenBao runs entirely " +
-							"in-memory and starts unsealed with a single unseal key. The root " +
-							"token is already authenticated to the CLI, so you can immediately " +
-							"begin using OpenBao."))
-					c.UI.Warn("")
-					c.UI.Warn("You may need to set the following environment variables:")
-					c.UI.Warn("")
+				// Print the big dev mode warning!
+				c.UI.Warn(wrapAtLength(
+					"WARNING! dev mode is enabled! In this mode, OpenBao runs entirely " +
+						"in-memory and starts unsealed with a single unseal key. The root " +
+						"token is already authenticated to the CLI, so you can immediately " +
+						"begin using OpenBao."))
+				c.UI.Warn("")
+				c.UI.Warn("You may need to set the following environment variables:")
+				c.UI.Warn("")
 
-					protocol := "http://"
-					if c.flagDevTLS {
-						protocol = "https://"
-					}
+				protocol := "http://"
+				if c.flagDevTLS {
+					protocol = "https://"
+				}
 
-					endpointURL := protocol + config.Listeners[0].Address
+				endpointURL := protocol + config.Listeners[0].Address
+				if runtime.GOOS == "windows" {
+					c.UI.Warn("PowerShell:")
+					c.UI.Warn(fmt.Sprintf("    $env:BAO_ADDR=\"%s\"", endpointURL))
+					c.UI.Warn("cmd.exe:")
+					c.UI.Warn(fmt.Sprintf("    set BAO_ADDR=%s", endpointURL))
+				} else {
+					c.UI.Warn(fmt.Sprintf("    $ export BAO_ADDR='%s'", endpointURL))
+				}
+
+				if c.flagDevTLS {
 					if runtime.GOOS == "windows" {
 						c.UI.Warn("PowerShell:")
-						c.UI.Warn(fmt.Sprintf("    $env:BAO_ADDR=\"%s\"", endpointURL))
+						c.UI.Warn(fmt.Sprintf("    $env:BAO_CACERT=\"%s/vault-ca.pem\"", certDir))
 						c.UI.Warn("cmd.exe:")
-						c.UI.Warn(fmt.Sprintf("    set BAO_ADDR=%s", endpointURL))
+						c.UI.Warn(fmt.Sprintf("    set BAO_CACERT=%s/vault-ca.pem", certDir))
 					} else {
-						c.UI.Warn(fmt.Sprintf("    $ export BAO_ADDR='%s'", endpointURL))
+						c.UI.Warn(fmt.Sprintf("    $ export BAO_CACERT='%s/vault-ca.pem'", certDir))
 					}
+					c.UI.Warn("")
+				}
 
-					if c.flagDevTLS {
-						if runtime.GOOS == "windows" {
-							c.UI.Warn("PowerShell:")
-							c.UI.Warn(fmt.Sprintf("    $env:BAO_CACERT=\"%s/vault-ca.pem\"", certDir))
-							c.UI.Warn("cmd.exe:")
-							c.UI.Warn(fmt.Sprintf("    set BAO_CACERT=%s/vault-ca.pem", certDir))
-						} else {
-							c.UI.Warn(fmt.Sprintf("    $ export BAO_CACERT='%s/vault-ca.pem'", certDir))
-						}
-						c.UI.Warn("")
-					}
-
-					// Unseal key is not returned if stored shares is supported
-					if len(init.SecretShares) > 0 {
-						c.UI.Warn("")
-						c.UI.Warn(wrapAtLength(
-							"The unseal key and root token are displayed below in case you want " +
-								"to seal/unseal the Vault or re-authenticate."))
-						c.UI.Warn("")
-						c.UI.Warn(fmt.Sprintf("Unseal Key: %s", base64.StdEncoding.EncodeToString(init.SecretShares[0])))
-					}
-
-					if len(init.RecoveryShares) > 0 {
-						c.UI.Warn("")
-						c.UI.Warn(wrapAtLength(
-							"The recovery key and root token are displayed below in case you want " +
-								"to seal/unseal the Vault or re-authenticate."))
-						c.UI.Warn("")
-						c.UI.Warn(fmt.Sprintf("Recovery Key: %s", base64.StdEncoding.EncodeToString(init.RecoveryShares[0])))
-					}
-
-					c.UI.Warn(fmt.Sprintf("Root Token: %s", init.RootToken))
-
-					if len(plugins) > 0 {
-						c.UI.Warn("")
-						c.UI.Warn(wrapAtLength(
-							"The following dev plugins are registered in the catalog:"))
-						for _, p := range plugins {
-							c.UI.Warn(fmt.Sprintf("    - %s", p))
-						}
-					}
-
-					if len(pluginsNotLoaded) > 0 {
-						c.UI.Warn("")
-						c.UI.Warn(wrapAtLength(
-							"The following dev plugins FAILED to be registered in the catalog due to unknown type:"))
-						for _, p := range pluginsNotLoaded {
-							c.UI.Warn(fmt.Sprintf("    - %s", p))
-						}
-					}
-
+				// Unseal key is not returned if stored shares is supported
+				if len(init.SecretShares) > 0 {
 					c.UI.Warn("")
 					c.UI.Warn(wrapAtLength(
-						"Development mode should NOT be used in production installations!"))
+						"The unseal key and root token are displayed below in case you want " +
+							"to seal/unseal the Vault or re-authenticate."))
 					c.UI.Warn("")
-				})
-			}),
-		}
+					c.UI.Warn(fmt.Sprintf("Unseal Key: %s", base64.StdEncoding.EncodeToString(init.SecretShares[0])))
+				}
+
+				if len(init.RecoveryShares) > 0 {
+					c.UI.Warn("")
+					c.UI.Warn(wrapAtLength(
+						"The recovery key and root token are displayed below in case you want " +
+							"to seal/unseal the Vault or re-authenticate."))
+					c.UI.Warn("")
+					c.UI.Warn(fmt.Sprintf("Recovery Key: %s", base64.StdEncoding.EncodeToString(init.RecoveryShares[0])))
+				}
+
+				c.UI.Warn(fmt.Sprintf("Root Token: %s", init.RootToken))
+
+				if len(plugins) > 0 {
+					c.UI.Warn("")
+					c.UI.Warn(wrapAtLength(
+						"The following dev plugins are registered in the catalog:"))
+					for _, p := range plugins {
+						c.UI.Warn(fmt.Sprintf("    - %s", p))
+					}
+				}
+
+				if len(pluginsNotLoaded) > 0 {
+					c.UI.Warn("")
+					c.UI.Warn(wrapAtLength(
+						"The following dev plugins FAILED to be registered in the catalog due to unknown type:"))
+					for _, p := range pluginsNotLoaded {
+						c.UI.Warn(fmt.Sprintf("    - %s", p))
+					}
+				}
+
+				c.UI.Warn("")
+				c.UI.Warn(wrapAtLength(
+					"Development mode should NOT be used in production installations!"))
+				c.UI.Warn("")
+			})
+		})
 		c.logger.RegisterSink(qw)
 	}
 	return nil

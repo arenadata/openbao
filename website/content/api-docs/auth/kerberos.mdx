@@ -573,6 +573,13 @@ sWw
   login. Tokens issued from roles are renewable; tokens issued through LDAP
   are not.
 
+- `delegation_token` `(string: "")` – A delegation token issued by
+  `delegation/token`, in its URL string form. Logs in as the token's owner
+  with the role recorded at issuance; no `Authorization` header is needed
+  and `role` is rejected. The OpenBao token's explicit max TTL is capped by
+  the delegation token's remaining time to `expiry`, and it renews only
+  while the delegation token is valid. See [Delegation tokens](#delegation-tokens).
+
 ### Sample request
 
 ```shell-session
@@ -580,4 +587,221 @@ $ curl \
     --header "Authorization: Negotiate YIIFSw...sWw" \
     --request POST \
     http://127.0.0.1:8200/v1/auth/kerberos/login
+```
+
+## Delegation tokens
+
+Delegation tokens let a SPNEGO-authenticated principal hand a credential to
+processes without Kerberos credentials. They are byte-compatible with Hadoop's
+`AbstractDelegationTokenIdentifier` and `Token`, require roles (no
+`config/ldap`) and are enabled by writing `config/delegation`. The
+`delegation/` endpoints take the same `Authorization: Negotiate` header as
+`login`; a delegation token can never be used to obtain another one. Dates in
+responses are milliseconds since the Unix epoch, as in Hadoop.
+
+### Configure delegation tokens
+
+| Method | Path                                |
+| :----- | :---------------------------------- |
+| `POST` | `/auth/kerberos/config/delegation`  |
+
+Writing the configuration enables delegation tokens. Parameters not sent keep
+their current value, or their default on the first write.
+
+#### Parameters
+
+- `renew_interval` `(duration: "24h")` – How far a renewal extends a token's
+  `expiry`, capped by its `max_date`. Also the initial expiry of a new token.
+  Must not exceed `max_lifetime`.
+- `max_lifetime` `(duration: "168h")` – Hard lifetime ceiling of an issued
+  token; renewals never extend a token past it.
+- `key_rotation_interval` `(duration: "24h")` – How often the signing key is
+  replaced. A key is kept while a token signed with it exists.
+- `cleanup_interval` `(duration: "1h")` – How often expired tokens and
+  unreferenced signing keys are removed from storage.
+- `token_kind` `(string: "OPENBAO_DELEGATION_TOKEN")` – Hadoop token kind
+  written into issued tokens and required on presented ones. Must match the
+  kind of the `TokenIdentifier` class on the Hadoop side.
+
+#### Sample payload
+
+```json
+{
+  "renew_interval": "24h",
+  "max_lifetime": "168h"
+}
+```
+
+#### Sample request
+
+```shell-session
+$ curl \
+    --header "X-Vault-Token: ..." \
+    --request POST \
+    --data @payload.json \
+    http://127.0.0.1:8200/v1/auth/kerberos/config/delegation
+```
+
+### Read delegation token configuration
+
+| Method | Path                                |
+| :----- | :---------------------------------- |
+| `GET`  | `/auth/kerberos/config/delegation`  |
+
+#### Sample request
+
+```shell-session
+$ curl \
+    --header "X-Vault-Token: ..." \
+    http://127.0.0.1:8200/v1/auth/kerberos/config/delegation
+```
+
+#### Sample response
+
+```json
+{
+  "data": {
+    "cleanup_interval": 3600,
+    "key_rotation_interval": 86400,
+    "max_lifetime": 604800,
+    "renew_interval": 86400,
+    "token_kind": "OPENBAO_DELEGATION_TOKEN"
+  }
+}
+```
+
+### Delete delegation token configuration
+
+| Method   | Path                                |
+| :------- | :---------------------------------- |
+| `DELETE` | `/auth/kerberos/config/delegation`  |
+
+Disables delegation tokens and removes every issued token and signing key.
+
+#### Sample request
+
+```shell-session
+$ curl \
+    --header "X-Vault-Token: ..." \
+    --request DELETE \
+    http://127.0.0.1:8200/v1/auth/kerberos/config/delegation
+```
+
+### Issue delegation token
+
+| Method | Path                              |
+| :----- | :-------------------------------- |
+| `POST` | `/auth/kerberos/delegation/token` |
+
+Issues a token owned by the SPNEGO-authenticated principal. The principal is
+matched against roles exactly as at login and the selected role is recorded
+in the token; a login with the token uses that role. The role's
+`token_bound_cidrs` are enforced on the caller.
+
+#### Parameters
+
+- `renewer` `(string: "")` – Name allowed to renew the token, compared with
+  the renewing principal's full name and, for callers from the owner's realm
+  only, its `primary/instance` and its primary alone. Empty makes the token
+  non-renewable.
+- `service` `(string: "")` – Hadoop token service written into the token.
+  Not interpreted by OpenBao.
+- `max_lifetime` `(duration: "")` – Requested hard lifetime, capped by the
+  configured `max_lifetime`.
+- `role` `(string: "")` – Role to issue the token for. Without it every role
+  is matched and exactly one must match the principal.
+
+#### Sample request
+
+```shell-session
+$ curl \
+    --header "Authorization: Negotiate YIIFSw...sWw" \
+    --request POST \
+    --data '{"renewer": "yarn", "service": "openbao.example.com:8200"}' \
+    http://127.0.0.1:8200/v1/auth/kerberos/delegation/token
+```
+
+#### Sample response
+
+```json
+{
+  "data": {
+    "expiry": 1756425600000,
+    "issue_date": 1756339200000,
+    "kind": "OPENBAO_DELEGATION_TOKEN",
+    "master_key_id": 1,
+    "max_date": 1756944000000,
+    "owner": "hadoop/nn1.matrix.lan@MATRIX.LAN",
+    "renewer": "yarn",
+    "role": "hadoop",
+    "sequence_number": 42,
+    "service": "openbao.example.com:8200",
+    "token": "KAARYWxpY2VARVhBTVBMRS5DT00DYm9iAIoBmO35YACKAZkSBeQAKgEgAQ..."
+  }
+}
+```
+
+`token` is the Hadoop URL string form of `Token`, readable with
+`Token.decodeFromUrlString()`; it contains the identifier, the password, the
+kind and the service.
+
+### Renew delegation token
+
+| Method | Path                              |
+| :----- | :-------------------------------- |
+| `POST` | `/auth/kerberos/delegation/renew` |
+
+Extends the token's `expiry` by `renew_interval`, never past `max_date`. The
+SPNEGO-authenticated caller must be the token's renewer.
+
+#### Parameters
+
+- `token` `(string: <required>)` – The delegation token in its URL string
+  form.
+
+#### Sample request
+
+```shell-session
+$ curl \
+    --header "Authorization: Negotiate YIIFSw...sWw" \
+    --request POST \
+    --data '{"token": "KAARYWxpY2..."}' \
+    http://127.0.0.1:8200/v1/auth/kerberos/delegation/renew
+```
+
+#### Sample response
+
+```json
+{
+  "data": {
+    "expiry": 1756512000000,
+    "max_date": 1756944000000,
+    "sequence_number": 42
+  }
+}
+```
+
+### Cancel delegation token
+
+| Method | Path                               |
+| :----- | :--------------------------------- |
+| `POST` | `/auth/kerberos/delegation/cancel` |
+
+Removes the token; it can no longer log in or be renewed. The
+SPNEGO-authenticated caller must be the token's owner or renewer. OpenBao
+tokens already issued from it are not revoked but cannot be renewed.
+
+#### Parameters
+
+- `token` `(string: <required>)` – The delegation token in its URL string
+  form.
+
+#### Sample request
+
+```shell-session
+$ curl \
+    --header "Authorization: Negotiate YIIFSw...sWw" \
+    --request POST \
+    --data '{"token": "KAARYWxpY2..."}' \
+    http://127.0.0.1:8200/v1/auth/kerberos/delegation/cancel
 ```

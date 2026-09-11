@@ -5,10 +5,12 @@ package kerberos
 
 import (
 	"context"
+	"crypto/hmac"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/hashicorp/go-hclog"
@@ -34,13 +36,19 @@ func (b *backend) pathLogin() *framework.Path {
 		Fields: map[string]*framework.FieldSchema{
 			"authorization": {
 				Type:        framework.TypeString,
-				Description: `SPNEGO Authorization header. Required.`,
+				Description: `SPNEGO Authorization header. Required unless delegation_token is set.`,
 			},
 			"role": {
 				Type: framework.TypeString,
 				Description: `Name of the role to log in with. Optional; without it
 every role is matched and exactly one must match. Rejected while
-"config/ldap" is set.`,
+"config/ldap" is set and with delegation_token, whose role was fixed
+at issuance.`,
+			},
+			"delegation_token": {
+				Type: framework.TypeString,
+				Description: `A delegation token issued by "delegation/token", in its URL
+string form. Logs in as the token's owner without SPNEGO.`,
 			},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
@@ -108,34 +116,19 @@ func (b *backend) pathLoginUpdate(ctx context.Context, req *logical.Request, d *
 		}
 	}
 
-	authorizationString := ""
-	authorizationHeaders := req.Headers["Authorization"]
-	if len(authorizationHeaders) > 0 {
-		authorizationString = authorizationHeaders[0]
-	} else {
-		authorizationString = d.Get("authorization").(string)
-	}
-
-	s := strings.SplitN(authorizationString, " ", 2)
-	if len(s) != 2 || s[0] != "Negotiate" {
-		return b.pathLoginGet(ctx, req, d)
-	}
-
-	kt, err := parseKeytab(kerbCfg.Keytab)
-	if err != nil {
-		return nil, fmt.Errorf("could not parse keytab: %w", err)
-	}
-
-	if kerbCfg.RemoveInstanceName {
-		removeInstanceNameFromKeytab(kt)
-	}
-
-	identity, w := b.spnegoAuthenticate(req, kerbCfg, kt, authorizationString)
-	if identity == nil {
-		resp := &logical.Response{
-			Warnings: []string{string(w.body)},
+	if delegationToken := d.Get("delegation_token").(string); delegationToken != "" {
+		if roleName != "" {
+			return logical.ErrorResponse("role is not applicable with delegation_token"), logical.ErrInvalidRequest
 		}
-		return logical.RespondWithStatusCode(resp, req, w.statusCode)
+		if isNegotiate(authorizationValue(req, d)) {
+			return logical.ErrorResponse("a SPNEGO token and delegation_token cannot be combined"), logical.ErrInvalidRequest
+		}
+		return b.loginWithDelegationToken(ctx, req, delegationToken)
+	}
+
+	identity, resp, err := b.negotiate(ctx, req, d, kerbCfg)
+	if identity == nil {
+		return resp, err
 	}
 
 	if ldapCfg == nil {
@@ -157,6 +150,51 @@ func (b *backend) pathLoginUpdate(ctx context.Context, req *logical.Request, d *
 	}
 
 	return b.loginWithLdap(ctx, req, kerbCfg, ldapCfg, identity)
+}
+
+// negotiate verifies the SPNEGO token from the Authorization header or the
+// authorization field. Without a Negotiate token it answers with the 401
+// challenge; on failure the response carries the SPNEGO status. A nil
+// identity means the response and error are to be returned as is.
+func (b *backend) negotiate(ctx context.Context, req *logical.Request, d *framework.FieldData, kerbCfg *kerberosConfig) (goidentity.Identity, *logical.Response, error) {
+	authorizationString := authorizationValue(req, d)
+	if !isNegotiate(authorizationString) {
+		resp, err := b.pathLoginGet(ctx, req, d)
+		return nil, resp, err
+	}
+
+	kt, err := parseKeytab(kerbCfg.Keytab)
+	if err != nil {
+		return nil, nil, fmt.Errorf("could not parse keytab: %w", err)
+	}
+
+	if kerbCfg.RemoveInstanceName {
+		removeInstanceNameFromKeytab(kt)
+	}
+
+	identity, w := b.spnegoAuthenticate(req, kerbCfg, kt, authorizationString)
+	if identity == nil {
+		resp := &logical.Response{
+			Warnings: []string{string(w.body)},
+		}
+		resp, err := logical.RespondWithStatusCode(resp, req, w.statusCode)
+		return nil, resp, err
+	}
+	return identity, nil, nil
+}
+
+// authorizationValue is the Authorization header, or the authorization
+// field when the header is absent.
+func authorizationValue(req *logical.Request, d *framework.FieldData) string {
+	if headers := req.Headers["Authorization"]; len(headers) > 0 {
+		return headers[0]
+	}
+	return d.Get("authorization").(string)
+}
+
+func isNegotiate(authorization string) bool {
+	s := strings.SplitN(authorization, " ", 2)
+	return len(s) == 2 && s[0] == "Negotiate"
 }
 
 // checkBoundCIDRs denies the request when cidrs is set and the caller's
@@ -228,12 +266,12 @@ func (b *backend) spnegoAuthenticate(req *logical.Request, kerbCfg *kerberosConf
 	return identity, w
 }
 
-func newAuth(identity goidentity.Identity, aliasName string) *logical.Auth {
+func newAuth(user, domain, aliasName string) *logical.Auth {
 	return &logical.Auth{
 		InternalData: map[string]interface{}{},
 		Metadata: map[string]string{
-			"user":   identity.UserName(),
-			"domain": identity.Domain(),
+			"user":   user,
+			"domain": domain,
 		},
 		DisplayName: aliasName,
 		Alias:       &logical.Alias{Name: aliasName},
@@ -318,7 +356,7 @@ func (b *backend) loginWithLdap(ctx context.Context, req *logical.Request, kerbC
 	// Policies from each group may overlap
 	policies = strutil.RemoveDuplicates(policies, true)
 
-	auth := newAuth(identity, identity.UserName())
+	auth := newAuth(identity.UserName(), identity.Domain(), identity.UserName())
 	if err := ldapCfg.PopulateTokenAuth(auth, req); err != nil {
 		return nil, fmt.Errorf("failed to populate auth information: %w", err)
 	}
@@ -352,35 +390,44 @@ func (b *backend) loginWithLdap(ctx context.Context, req *logical.Request, kerbC
 	}, nil
 }
 
-// loginWithRoles completes the login from the single role bound to the
-// identity's principal.
-func (b *backend) loginWithRoles(ctx context.Context, req *logical.Request, identity goidentity.Identity, roleName string) (*logical.Response, error) {
-	principal := identity.UserName() + "@" + identity.Domain()
-
-	roles, err := b.matchingRoles(ctx, req.Storage, principal, roleName)
+// selectRole returns the single role bound to principal, or the denial to
+// return when none or several are.
+func (b *backend) selectRole(ctx context.Context, s logical.Storage, principal, roleName string) (*kerberosRole, *logical.Response, error) {
+	roles, err := b.matchingRoles(ctx, s, principal, roleName)
 	if err != nil {
-		return nil, fmt.Errorf("unable to match roles: %w", err)
+		return nil, nil, fmt.Errorf("unable to match roles: %w", err)
 	}
 	switch {
 	case len(roles) == 0 && roleName != "":
-		return logical.ErrorResponse("role %q is not bound to principal %q", roleName, principal), logical.ErrPermissionDenied
+		return nil, logical.ErrorResponse("role %q is not bound to principal %q", roleName, principal), logical.ErrPermissionDenied
 	case len(roles) == 0:
-		return logical.ErrorResponse("no role is bound to principal %q", principal), logical.ErrPermissionDenied
+		return nil, logical.ErrorResponse("no role is bound to principal %q", principal), logical.ErrPermissionDenied
 	case len(roles) > 1:
 		names := make([]string, 0, len(roles))
 		for _, role := range roles {
 			names = append(names, role.Name)
 		}
-		return logical.ErrorResponse("principal %q is bound to roles %s; pass role to select one",
+		return nil, logical.ErrorResponse("principal %q is bound to roles %s; pass role to select one",
 			principal, strings.Join(names, ", ")), logical.ErrPermissionDenied
 	}
-	role := roles[0]
+	return roles[0], nil, nil
+}
+
+// loginWithRoles completes the login from the single role bound to the
+// identity's principal.
+func (b *backend) loginWithRoles(ctx context.Context, req *logical.Request, identity goidentity.Identity, roleName string) (*logical.Response, error) {
+	principal := fullPrincipal(identity)
+
+	role, resp, err := b.selectRole(ctx, req.Storage, principal, roleName)
+	if role == nil {
+		return resp, err
+	}
 
 	if err := checkBoundCIDRs(b, req, role.TokenBoundCIDRs); err != nil {
 		return nil, err
 	}
 
-	auth := newAuth(identity, principal)
+	auth := newAuth(identity.UserName(), identity.Domain(), principal)
 	auth.Metadata["role"] = role.Name
 	auth.InternalData["role"] = role.Name
 	auth.InternalData["principal"] = principal
@@ -394,8 +441,71 @@ func (b *backend) loginWithRoles(ctx context.Context, req *logical.Request, iden
 	}, nil
 }
 
+// loginWithDelegationToken logs in as the owner of a delegation token with
+// the role fixed at issuance. The token's remaining renewable lifetime caps
+// the issued OpenBao token.
+func (b *backend) loginWithDelegationToken(ctx context.Context, req *logical.Request, urlString string) (*logical.Response, error) {
+	cfg, resp, err := b.delegationEnabled(ctx, req)
+	if cfg == nil {
+		return resp, err
+	}
+
+	now := b.now()
+	id, entry, resp, err := b.verifyDelegationToken(ctx, req.Storage, cfg, urlString, now)
+	if id == nil {
+		return resp, err
+	}
+
+	role, err := b.role(ctx, req.Storage, entry.Role)
+	if err != nil {
+		return nil, fmt.Errorf("unable to read role %q: %w", entry.Role, err)
+	}
+	if role == nil || !role.matches(id.Owner) {
+		return logical.ErrorResponse("role %q of delegation token %d no longer binds principal %q", entry.Role, id.SequenceNumber, id.Owner), logical.ErrPermissionDenied
+	}
+	if err := checkBoundCIDRs(b, req, role.TokenBoundCIDRs); err != nil {
+		return nil, err
+	}
+
+	user, domain := splitPrincipal(id.Owner)
+	seq := strconv.FormatInt(int64(id.SequenceNumber), 10)
+	auth := newAuth(user, domain, id.Owner)
+	auth.Metadata["role"] = role.Name
+	auth.Metadata["delegation_token"] = seq
+	auth.InternalData["role"] = role.Name
+	auth.InternalData["principal"] = id.Owner
+	auth.InternalData["delegation_token"] = seq
+	auth.InternalData["delegation_token_identifier"] = base64.StdEncoding.EncodeToString(entry.Identifier)
+
+	if err := role.PopulateTokenAuth(auth, req); err != nil {
+		return nil, fmt.Errorf("failed to populate auth information: %w", err)
+	}
+	// verifyDelegationToken passed against the same now, so remaining > 0.
+	if remaining := entry.Expiry.Sub(now); auth.ExplicitMaxTTL == 0 || auth.ExplicitMaxTTL > remaining {
+		auth.ExplicitMaxTTL = remaining
+	}
+
+	return &logical.Response{
+		Auth: auth,
+	}, nil
+}
+
+// splitPrincipal separates the realm from a full principal name.
+func splitPrincipal(principal string) (user, realm string) {
+	if at := strings.LastIndex(principal, "@"); at >= 0 {
+		return principal[:at], principal[at+1:]
+	}
+	return principal, ""
+}
+
+func principalRealm(principal string) string {
+	_, realm := splitPrincipal(principal)
+	return realm
+}
+
 // pathLoginRenew renews tokens issued from a role; LDAP-mode tokens are not
-// renewable and never reach it.
+// renewable and never reach it. A token logged in with a delegation token
+// also needs that delegation token to still be valid.
 func (b *backend) pathLoginRenew(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	roleName, _ := req.Auth.InternalData["role"].(string)
 	principal, _ := req.Auth.InternalData["principal"].(string)
@@ -417,11 +527,44 @@ func (b *backend) pathLoginRenew(ctx context.Context, req *logical.Request, d *f
 		return nil, errors.New("policies have changed, not renewing")
 	}
 
+	if seq, _ := req.Auth.InternalData["delegation_token"].(string); seq != "" {
+		identifier, _ := req.Auth.InternalData["delegation_token_identifier"].(string)
+		if err := b.checkDelegationTokenAlive(ctx, req.Storage, seq, identifier); err != nil {
+			return nil, err
+		}
+	}
+
 	resp := &logical.Response{Auth: req.Auth}
 	resp.Auth.TTL = role.TokenTTL
 	resp.Auth.MaxTTL = role.TokenMaxTTL
 	resp.Auth.Period = role.TokenPeriod
 	return resp, nil
+}
+
+// checkDelegationTokenAlive fails when the delegation token behind a login
+// was cancelled or has expired since. The record is matched by identifier,
+// not only by sequence number, which is reused after the configuration is
+// deleted and recreated.
+func (b *backend) checkDelegationTokenAlive(ctx context.Context, s logical.Storage, seq, identifierB64 string) error {
+	n, err := strconv.ParseInt(seq, 10, 32)
+	if err != nil {
+		return fmt.Errorf("invalid delegation token reference %q", seq)
+	}
+	identifier, err := base64.StdEncoding.DecodeString(identifierB64)
+	if err != nil || len(identifier) == 0 {
+		return fmt.Errorf("invalid delegation token identifier reference for token %s", seq)
+	}
+	entry, err := b.delegationTokenEntry(ctx, s, int32(n))
+	if err != nil {
+		return fmt.Errorf("failed to read delegation token %s: %w", seq, err)
+	}
+	if entry == nil || !hmac.Equal(entry.Identifier, identifier) {
+		return fmt.Errorf("delegation token %s has been cancelled", seq)
+	}
+	if !b.now().Before(entry.Expiry) {
+		return fmt.Errorf("delegation token %s has expired", seq)
+	}
+	return nil
 }
 
 type simpleResponseWriter struct {

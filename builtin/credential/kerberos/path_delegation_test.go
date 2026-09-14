@@ -469,6 +469,87 @@ func TestDelegation_KeyRotationAndCleanup(t *testing.T) {
 	assertDenied(t, "login after key pruned", resp, err, logical.ErrPermissionDenied, "signature is invalid")
 }
 
+// hookedStorage runs a callback the first time key is read, standing in for
+// a write that lands between the cleanup scan's read and its delete.
+type hookedStorage struct {
+	logical.Storage
+
+	key  string
+	once func()
+}
+
+func (s *hookedStorage) Get(ctx context.Context, key string) (*logical.StorageEntry, error) {
+	entry, err := s.Storage.Get(ctx, key)
+	if key == s.key && s.once != nil {
+		fire := s.once
+		s.once = nil
+		fire()
+	}
+	return entry, err
+}
+
+func TestDelegation_CleanupKeepsRenewedToken(t *testing.T) {
+	h := newDelegationHarness(t)
+	ctx := context.Background()
+	urlString := h.issue("alice", map[string]interface{}{"renewer": "yarn"}).Data["token"].(string)
+	h.clock.advance(testRenewInterval + time.Second)
+
+	path := delegationTokenPath(1)
+	scanned := false
+	storage := &hookedStorage{Storage: h.storage, key: path, once: func() {
+		entry, err := h.b.delegationTokenEntry(ctx, h.storage, 1)
+		if err != nil || entry == nil {
+			t.Fatalf("token record during scan: err %v entry %#v", err, entry)
+		}
+		entry.Expiry = h.clock.now().Add(testRenewInterval)
+		if err := putJSON(ctx, h.storage, path, entry); err != nil {
+			t.Fatal(err)
+		}
+		scanned = true
+	}}
+
+	if err := h.b.periodicDelegation(ctx, &logical.Request{Storage: storage}); err != nil {
+		t.Fatal(err)
+	}
+	if !scanned {
+		t.Fatal("cleanup never read the token record")
+	}
+	if got := h.list(delegationTokenPrefix); !reflect.DeepEqual(got, []string{"1"}) {
+		t.Fatalf("renewed token was deleted: %v", got)
+	}
+	if resp, err := h.login(urlString, nil); err != nil || resp == nil || resp.Auth == nil {
+		t.Fatalf("login after cleanup: err %v resp %#v", err, resp)
+	}
+}
+
+func TestDelegation_KeyOutlivesTokensAfterShorterMaxLifetime(t *testing.T) {
+	h := newDelegationHarness(t)
+	urlString := h.issue("alice", nil).Data["token"].(string)
+
+	// Shortening the configured lifetimes must not retire the key ahead of
+	// the tokens it already signed.
+	h.clock.advance(5 * time.Minute)
+	mustRequest(t, h.b, h.storage, logical.UpdateOperation, delegationConfigPath, map[string]interface{}{
+		"renew_interval": 300,
+		"max_lifetime":   600,
+	})
+
+	h.clock.advance(testKeyRotation - 5*time.Minute)
+	h.periodic()
+	if got := h.list(delegationKeyPrefix); !reflect.DeepEqual(got, []string{"1", "2"}) {
+		t.Fatalf("keys after rotation: %v", got)
+	}
+
+	h.clock.advance(15 * time.Minute)
+	h.periodic()
+	if got := h.list(delegationKeyPrefix); !reflect.DeepEqual(got, []string{"1", "2"}) {
+		t.Fatalf("signing key of a live token was pruned: %v", got)
+	}
+	if resp, err := h.login(urlString, nil); err != nil || resp == nil || resp.Auth == nil {
+		t.Fatalf("login after key pruning: err %v resp %#v", err, resp)
+	}
+}
+
 func TestDelegation_CallerMatches(t *testing.T) {
 	rm := testIdentity("yarn/rm.example.com", testRealm)
 	for name, want := range map[string]bool{

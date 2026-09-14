@@ -38,6 +38,10 @@ type delegationKey struct {
 	// Expires is set when the key stops being current: the latest max date
 	// a token signed with it can carry. Zero while the key is current.
 	Expires time.Time `json:"expires,omitempty"`
+	// MaxLifetime is the largest lifetime given to a token signed with this
+	// key. It bounds those tokens' max dates even after the configured
+	// max_lifetime changes.
+	MaxLifetime time.Duration `json:"max_lifetime,omitempty"`
 }
 
 // delegationTokenEntry is the server-side record of an issued token. The
@@ -106,7 +110,7 @@ func (b *backend) rotateDelegationKey(ctx context.Context, s logical.Storage, cf
 			return nil, err
 		}
 		if old != nil {
-			old.Expires = now.Add(cfg.MaxLifetime)
+			old.Expires = now.Add(old.MaxLifetime)
 			if err := putJSON(ctx, s, delegationKeyPath(old.ID), old); err != nil {
 				return nil, err
 			}
@@ -169,6 +173,12 @@ func (b *backend) issueDelegationToken(ctx context.Context, s logical.Storage, c
 
 	if maxLifetime <= 0 || maxLifetime > cfg.MaxLifetime {
 		maxLifetime = cfg.MaxLifetime
+	}
+	if key.MaxLifetime < maxLifetime {
+		key.MaxLifetime = maxLifetime
+		if err := putJSON(ctx, s, delegationKeyPath(key.ID), key); err != nil {
+			return nil, nil, nil, err
+		}
 	}
 	now := b.now()
 	seq := state.NextSequence
@@ -319,7 +329,7 @@ func (b *backend) pruneDelegationKeys(ctx context.Context, s logical.Storage, cf
 		if expires.IsZero() {
 			// Never retired: an orphan from an interrupted rotation, which
 			// signed nothing after the rotation interval.
-			expires = key.Created.Add(cfg.KeyRotationInterval + cfg.MaxLifetime)
+			expires = key.Created.Add(cfg.KeyRotationInterval + key.MaxLifetime)
 		}
 		if now.After(expires) {
 			if err := s.Delete(ctx, delegationKeyPath(int32(id))); err != nil {
@@ -333,7 +343,6 @@ func (b *backend) pruneDelegationKeys(ctx context.Context, s logical.Storage, cf
 // expireDelegationTokens deletes token records past their expiry, one page
 // at a time.
 func (b *backend) expireDelegationTokens(ctx context.Context, s logical.Storage) error {
-	now := b.now()
 	after := ""
 	for {
 		names, err := s.ListPage(ctx, delegationTokenPrefix, after, delegationCleanupPageSize)
@@ -349,10 +358,11 @@ func (b *backend) expireDelegationTokens(ctx context.Context, s logical.Storage)
 			if err != nil {
 				return err
 			}
-			if entry != nil && !now.Before(entry.Expiry) {
-				if err := s.Delete(ctx, delegationTokenPath(int32(seq))); err != nil {
-					return err
-				}
+			if entry == nil || b.now().Before(entry.Expiry) {
+				continue
+			}
+			if err := b.deleteExpiredToken(ctx, s, int32(seq)); err != nil {
+				return err
 			}
 		}
 		if len(names) < delegationCleanupPageSize {
@@ -360,4 +370,20 @@ func (b *backend) expireDelegationTokens(ctx context.Context, s logical.Storage)
 		}
 		after = names[len(names)-1]
 	}
+}
+
+// deleteExpiredToken removes an expired token record. The record is re-read
+// under the lock so a renewal that landed during the scan is not undone.
+func (b *backend) deleteExpiredToken(ctx context.Context, s logical.Storage, seq int32) error {
+	b.delegationLock.Lock()
+	defer b.delegationLock.Unlock()
+
+	entry, err := b.delegationTokenEntry(ctx, s, seq)
+	if err != nil || entry == nil {
+		return err
+	}
+	if b.now().Before(entry.Expiry) {
+		return nil
+	}
+	return s.Delete(ctx, delegationTokenPath(seq))
 }

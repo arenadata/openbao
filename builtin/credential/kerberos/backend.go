@@ -6,6 +6,8 @@ package kerberos
 import (
 	"context"
 	"encoding/json"
+	"sync"
+	"time"
 
 	"github.com/openbao/openbao/sdk/v2/framework"
 	"github.com/openbao/openbao/sdk/v2/logical"
@@ -20,6 +22,12 @@ const (
 
 type backend struct {
 	*framework.Backend
+
+	// delegationLock serializes delegation token issuance, renewal,
+	// cancellation and key rotation, which all read-modify-write storage.
+	delegationLock sync.Mutex
+	lastCleanup    time.Time
+	now            func() time.Time
 }
 
 func Factory(ctx context.Context, c *logical.BackendConfig) (logical.Backend, error) {
@@ -31,27 +39,37 @@ func Factory(ctx context.Context, c *logical.BackendConfig) (logical.Backend, er
 }
 
 func Backend() *backend {
-	b := &backend{}
+	b := &backend{now: time.Now}
 
 	b.Backend = &framework.Backend{
 		BackendType: logical.TypeCredential,
 		Help:        backendHelp,
 		PathsSpecial: &logical.Paths{
-			Unauthenticated: []string{"login"},
-			SealWrapStorage: []string{configPath},
+			Unauthenticated: []string{
+				"login",
+				delegationTokenPathName,
+				delegationRenewPathName,
+				delegationCancelPathName,
+			},
+			SealWrapStorage: []string{configPath, delegationKeyPrefix},
 		},
 		Paths: framework.PathAppend(
 			[]*framework.Path{
 				b.pathConfig(),
 				b.pathConfigLdap(),
+				b.pathConfigDelegation(),
 				b.pathLogin(),
 				b.pathGroups(),
 				b.pathGroupsList(),
 				b.pathRoles(),
 				b.pathRolesList(),
+				b.pathDelegationToken(),
+				b.pathDelegationRenew(),
+				b.pathDelegationCancel(),
 			},
 		),
-		AuthRenew: b.pathLoginRenew,
+		AuthRenew:    b.pathLoginRenew,
+		PeriodicFunc: b.periodicDelegation,
 	}
 
 	return b
@@ -78,5 +96,7 @@ var backendHelp string = `
 The Kerberos Auth Backend allows authentication via Kerberos SPNEGO.
 Policies are resolved either from LDAP group membership ("config/ldap" and
 "groups/") or, when LDAP is not configured, from roles binding Kerberos
-principals directly ("roles/").
+principals directly ("roles/"). With roles, "config/delegation" enables
+Hadoop-style delegation tokens that Kerberos-authenticated principals issue
+for processes without Kerberos credentials.
 `

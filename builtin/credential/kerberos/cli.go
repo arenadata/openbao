@@ -112,11 +112,11 @@ Usage: bao login -method=kerberos [CONFIG K=V...]
   Example authentication:
 
       $ bao login -method=kerberos \
-            -username=grace \
-            -service="HTTP/ab10dfy3be7v.matrix.lan:8200" \
-            -realm=MATRIX.LAN \
-            -keytab_path=/etc/krb5/krb5.keytab \
-            -krb5conf_path=/etc/krb5.conf
+            username=grace \
+            service="HTTP/ab10dfy3be7v.matrix.lan:8200" \
+            realm=MATRIX.LAN \
+            keytab_path=/etc/krb5/krb5.keytab \
+            krb5conf_path=/etc/krb5.conf
 
 Configuration:
 

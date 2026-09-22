@@ -23,6 +23,8 @@ replace github.com/openbao/openbao/sdk/v2 => ./sdk
 
 replace github.com/boltdb/bolt => ./helper/stubbolt
 
+replace github.com/go-krb5/krb5 => github.com/arenadata/go-krb5 v0.1.1-2.3.0-0
+
 require (
 	cloud.google.com/go/monitoring v1.24.3
 	github.com/ProtonMail/go-crypto v1.3.0
@@ -36,6 +38,7 @@ require (
 	github.com/fatih/color v1.18.0
 	github.com/go-errors/errors v1.5.1
 	github.com/go-jose/go-jose/v4 v4.1.4
+	github.com/go-krb5/krb5 v0.1.0
 	github.com/go-krb5/x v0.3.3
 	github.com/go-ldap/ldap/v3 v3.4.12
 	github.com/go-ldap/ldif v0.0.0-20200320164324-fd88d9b715b3
@@ -159,8 +162,6 @@ require (
 	zgo.at/zcache/v2 v2.4.1
 )
 
-require github.com/go-crypt/x v0.4.17 // indirect
-
 require (
 	cel.dev/expr v0.25.2 // indirect
 	cloud.google.com/go v0.123.0 // indirect
@@ -249,8 +250,8 @@ require (
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/go-asn1-ber/asn1-ber v1.5.8-0.20250403174932-29230038a667 // indirect
+	github.com/go-crypt/x v0.4.17 // indirect
 	github.com/go-jose/go-jose/v3 v3.0.5 // indirect
-	github.com/go-krb5/krb5 v0.1.0
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
@@ -386,5 +387,3 @@ require (
 )
 
 retract [v0.1.0, v1.17.0]
-
-replace github.com/go-krb5/krb5 => github.com/arenadata/go-krb5 v0.1.1-2.3.0-0

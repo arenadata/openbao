@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-krb5/krb5/types"
 	goidentity "github.com/go-krb5/x/identity"
 	"github.com/openbao/openbao/sdk/v2/framework"
 	"github.com/openbao/openbao/sdk/v2/logical"
@@ -266,7 +267,8 @@ func fullPrincipal(identity goidentity.Identity) string {
 // owner's realm only, as primary/instance or the bare primary, which is the
 // short name a default auth_to_local rule yields.
 func renewerMatches(identity goidentity.Identity, id *delegationTokenIdentifier) bool {
-	return callerMatches(identity, id.Renewer, principalRealm(id.Owner))
+	_, ownerRealm := types.ParseSPNString(id.Owner)
+	return callerMatches(identity, id.Renewer, ownerRealm)
 }
 
 func callerMatches(identity goidentity.Identity, name, realm string) bool {

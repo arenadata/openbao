@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-krb5/krb5/crypto"
 	"github.com/openbao/openbao/sdk/v2/framework"
 	"github.com/openbao/openbao/sdk/v2/logical"
 )
@@ -19,6 +20,13 @@ const (
 	// operationPrefixKerberos is used as a prefix for OpenAPI operation id's.
 	operationPrefixKerberos = "kerberos"
 )
+
+// The library leaves rc4-hmac and des3-cbc-sha1 unregistered; keytabs and
+// KDCs that still issue them must keep working after the upgrade.
+func init() {
+	crypto.RegisterDeprecatedRC4HMAC()
+	crypto.RegisterDeprecatedDes3CbcSha1Kd()
+}
 
 type backend struct {
 	*framework.Backend

@@ -1,6 +1,6 @@
 module github.com/openbao/openbao/api/auth/userpass/v2
 
-go 1.25.0
+go 1.26.0
 
 replace github.com/openbao/openbao/api/v2 => ../../
 
@@ -21,7 +21,7 @@ require (
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/ryanuber/go-glob v1.0.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
-	golang.org/x/text v0.41.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 )
 

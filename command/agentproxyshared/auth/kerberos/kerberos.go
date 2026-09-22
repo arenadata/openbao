@@ -9,9 +9,9 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/go-krb5/krb5/spnego"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-secure-stdlib/parseutil"
-	"github.com/jcmturner/gokrb5/v8/spnego"
 	"github.com/openbao/openbao/api/v2"
 	kerberos "github.com/openbao/openbao/builtin/credential/kerberos"
 	"github.com/openbao/openbao/command/agentproxyshared/auth"

@@ -9,22 +9,27 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
 
+	"github.com/go-krb5/krb5/credentials"
+	"github.com/go-krb5/krb5/gssapi"
+	"github.com/go-krb5/krb5/keytab"
+	"github.com/go-krb5/krb5/service"
+	"github.com/go-krb5/krb5/spnego"
+	"github.com/go-krb5/krb5/types"
+	"github.com/go-krb5/x/encoding/asn1"
+	goidentity "github.com/go-krb5/x/identity"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-secure-stdlib/strutil"
 	"github.com/hashicorp/go-sockaddr"
-	"github.com/jcmturner/gokrb5/v8/keytab"
-	"github.com/jcmturner/gokrb5/v8/service"
-	"github.com/jcmturner/gokrb5/v8/spnego"
 	"github.com/openbao/openbao/sdk/v2/framework"
 	"github.com/openbao/openbao/sdk/v2/helper/cidrutil"
 	"github.com/openbao/openbao/sdk/v2/helper/ldaputil"
 	"github.com/openbao/openbao/sdk/v2/helper/policyutil"
 	"github.com/openbao/openbao/sdk/v2/logical"
-	"gopkg.in/jcmturner/goidentity.v3"
 )
 
 func (b *backend) pathLogin() *framework.Path {
@@ -172,12 +177,12 @@ func (b *backend) negotiate(ctx context.Context, req *logical.Request, d *framew
 		removeInstanceNameFromKeytab(kt)
 	}
 
-	identity, w := b.spnegoAuthenticate(req, kerbCfg, kt, authorizationString)
+	identity, code, message := b.spnegoAuthenticate(req, kerbCfg, kt, authorizationString)
 	if identity == nil {
 		resp := &logical.Response{
-			Warnings: []string{string(w.body)},
+			Warnings: []string{message},
 		}
-		resp, err := logical.RespondWithStatusCode(resp, req, w.statusCode)
+		resp, err := logical.RespondWithStatusCode(resp, req, code)
 		return nil, resp, err
 	}
 	return identity, nil, nil
@@ -214,56 +219,76 @@ func checkBoundCIDRs(b *backend, req *logical.Request, cidrs []*sockaddr.SockAdd
 }
 
 // spnegoAuthenticate verifies the SPNEGO token in authorization against kt.
-// A nil identity means failure; the writer then holds the status code and message.
-func (b *backend) spnegoAuthenticate(req *logical.Request, kerbCfg *kerberosConfig, kt *keytab.Keytab, authorization string) (goidentity.Identity, *simpleResponseWriter) {
-	// The SPNEGOKRB5Authenticate method only calls an inner function if it's
-	// successful. Let's use it to record success, and to retrieve the caller's
-	// identity.
-	var identity goidentity.Identity
-	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw := r.Context().Value(goidentity.CTXKey)
-		if raw == nil {
-			w.WriteHeader(400)
-			_, _ = w.Write([]byte("identity credentials are not included"))
-			return
-		}
-		id, ok := raw.(goidentity.Identity)
-		if !ok {
-			w.WriteHeader(400)
-			_, _ = fmt.Fprintf(w, "identity credentials are malformed: %+v", raw)
-			return
-		}
-		b.Logger().Debug("spnego identity", "user", id.UserName(), "domain", id.Domain())
-		identity = id
-	})
-
-	// Let's pass in a logger so we can get debugging information if anything
-	// goes wrong.
+// A nil identity means failure; code and message then describe it.
+func (b *backend) spnegoAuthenticate(req *logical.Request, kerbCfg *kerberosConfig, kt *keytab.Keytab, authorization string) (goidentity.Identity, int, string) {
 	l := b.Logger().StandardLogger(&hclog.StandardLoggerOptions{
 		InferLevels: true,
 	})
 
-	// Now let's use our inner handler to compose the overall function.
-	authHTTPHandler := spnego.SPNEGOKRB5Authenticate(inner, kt, service.Logger(l), service.KeytabPrincipal(kerbCfg.ServiceAccount))
-
-	// Because the outer application strips off the raw request, we need to
-	// re-compose it to use this authentication handler. Only the request
-	// remote addr and the Authorization header are used anyways. We use an
-	// arbitrary port of 8080 because it's not used for anything but logging,
-	// but is required by an underlying parser.
-	remoteAddr := ""
+	// The PAC is not consumed here: identity comes from the ticket's cname,
+	// and a PAC the library cannot verify must not fail the login.
+	settings := []func(*service.Settings){
+		service.Logger(l),
+		service.KeytabPrincipal(kerbCfg.ServiceAccount),
+		service.DecodePAC(false),
+	}
+	// The client address is compared with the ticket's addresses when the
+	// ticket carries any.
 	if req.Connection != nil {
-		remoteAddr = req.Connection.RemoteAddr
-	}
-	rebuiltReq := &http.Request{
-		Header:     http.Header{spnego.HTTPHeaderAuthRequest: []string{authorization}},
-		RemoteAddr: remoteAddr + ":8080",
+		if ip := net.ParseIP(req.Connection.RemoteAddr); ip != nil {
+			settings = append(settings, service.ClientAddress(types.HostAddressFromNetIP(ip)))
+		}
 	}
 
-	// Finally, execute the SPNEGO authentication check.
-	w := &simpleResponseWriter{}
-	authHTTPHandler.ServeHTTP(w, rebuiltReq)
-	return identity, w
+	token, err := parseSPNEGOToken(authorization)
+	if err != nil {
+		return nil, http.StatusUnauthorized, err.Error()
+	}
+
+	authed, ctx, status := spnego.SPNEGOService(kt, settings...).AcceptSecContext(token)
+	if status.Code == gssapi.StatusContinueNeeded {
+		return nil, http.StatusUnauthorized, "multi-leg SPNEGO negotiation is not supported; Kerberos must be the first mechanism offered"
+	}
+	if !authed || status.Code != gssapi.StatusComplete {
+		message := status.Message
+		if message == "" {
+			message = "SPNEGO authentication failed"
+		}
+		return nil, http.StatusUnauthorized, message
+	}
+	creds, ok := ctx.Value(spnego.CTXKey).(*credentials.Credentials)
+	if !ok {
+		return nil, http.StatusInternalServerError, "identity credentials are not included"
+	}
+	b.Logger().Debug("spnego identity", "user", creds.UserName(), "domain", creds.Domain())
+	return creds, http.StatusOK, ""
+}
+
+// parseSPNEGOToken decodes a Negotiate header value. A raw KRB5 AP-REQ, which
+// some clients send instead of a NegTokenInit, is wrapped as one.
+func parseSPNEGOToken(authorization string) (*spnego.SPNEGOToken, error) {
+	parts := strings.SplitN(authorization, " ", 2)
+	if len(parts) != 2 {
+		return nil, errors.New("authorization is not a Negotiate token")
+	}
+	raw, err := base64.StdEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("SPNEGO token is not valid base64: %w", err)
+	}
+
+	var token spnego.SPNEGOToken
+	if err := token.Unmarshal(raw); err != nil {
+		var krb5Token spnego.KRB5Token
+		if krb5Token.Unmarshal(raw) != nil {
+			return nil, fmt.Errorf("error unmarshalling SPNEGO token: %w", err)
+		}
+		token.Init = true
+		token.NegTokenInit = spnego.NegTokenInit{
+			MechTypes:      []asn1.ObjectIdentifier{krb5Token.OID},
+			MechTokenBytes: raw,
+		}
+	}
+	return &token, nil
 }
 
 func newAuth(user, domain, aliasName string) *logical.Auth {
@@ -283,10 +308,7 @@ func newAuth(user, domain, aliasName string) *logical.Auth {
 func (b *backend) loginWithLdap(ctx context.Context, req *logical.Request, kerbCfg *kerberosConfig, ldapCfg *ldapConfigEntry, identity goidentity.Identity) (*logical.Response, error) {
 	username := identity.UserName()
 	if kerbCfg.RemoveInstanceName {
-		user := splitUsername(identity.UserName())
-		if len(user) > 1 {
-			username = user[0]
-		}
+		username, _, _ = strings.Cut(username, "/")
 	}
 
 	// Now that they've passed the Kerb authentication, begin checking if
@@ -467,7 +489,8 @@ func (b *backend) loginWithDelegationToken(ctx context.Context, req *logical.Req
 		return nil, err
 	}
 
-	user, domain := splitPrincipal(id.Owner)
+	owner, domain := types.ParseSPNString(id.Owner)
+	user := owner.PrincipalNameString()
 	seq := strconv.FormatInt(int64(id.SequenceNumber), 10)
 	auth := newAuth(user, domain, id.Owner)
 	auth.Metadata["role"] = role.Name
@@ -488,19 +511,6 @@ func (b *backend) loginWithDelegationToken(ctx context.Context, req *logical.Req
 	return &logical.Response{
 		Auth: auth,
 	}, nil
-}
-
-// splitPrincipal separates the realm from a full principal name.
-func splitPrincipal(principal string) (user, realm string) {
-	if at := strings.LastIndex(principal, "@"); at >= 0 {
-		return principal[:at], principal[at+1:]
-	}
-	return principal, ""
-}
-
-func principalRealm(principal string) string {
-	_, realm := splitPrincipal(principal)
-	return realm
 }
 
 // pathLoginRenew renews tokens issued from a role; LDAP-mode tokens are not
@@ -565,22 +575,4 @@ func (b *backend) checkDelegationTokenAlive(ctx context.Context, s logical.Stora
 		return fmt.Errorf("delegation token %s has expired", seq)
 	}
 	return nil
-}
-
-type simpleResponseWriter struct {
-	body       []byte
-	statusCode int
-}
-
-func (w *simpleResponseWriter) Header() http.Header {
-	return make(http.Header)
-}
-
-func (w *simpleResponseWriter) Write(b []byte) (int, error) {
-	w.body = b
-	return 0, nil
-}
-
-func (w *simpleResponseWriter) WriteHeader(statusCode int) {
-	w.statusCode = statusCode
 }

@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -244,20 +245,22 @@ func (b *backend) spnegoAuthenticate(req *logical.Request, kerbCfg *kerberosConf
 	})
 
 	// Now let's use our inner handler to compose the overall function.
-	authHTTPHandler := spnego.SPNEGOKRB5Authenticate(inner, kt, service.Logger(l), service.KeytabPrincipal(kerbCfg.ServiceAccount))
+	// The PAC is not consumed here: identity comes from the ticket's cname,
+	// and a PAC the library cannot verify must not fail the login.
+	authHTTPHandler := spnego.SPNEGOKRB5Authenticate(inner, kt, service.Logger(l), service.KeytabPrincipal(kerbCfg.ServiceAccount), service.DecodePAC(false))
 
 	// Because the outer application strips off the raw request, we need to
 	// re-compose it to use this authentication handler. Only the request
-	// remote addr and the Authorization header are used anyways. We use an
-	// arbitrary port of 8080 because it's not used for anything but logging,
-	// but is required by an underlying parser.
+	// remote addr and the Authorization header are used. The host is checked
+	// against the ticket's client addresses when it carries any; the port is
+	// discarded but the parser requires host:port form.
 	remoteAddr := ""
 	if req.Connection != nil {
 		remoteAddr = req.Connection.RemoteAddr
 	}
 	rebuiltReq := &http.Request{
 		Header:     http.Header{spnego.HTTPHeaderAuthRequest: []string{authorization}},
-		RemoteAddr: remoteAddr + ":8080",
+		RemoteAddr: net.JoinHostPort(remoteAddr, "8080"),
 	}
 
 	// Finally, execute the SPNEGO authentication check.

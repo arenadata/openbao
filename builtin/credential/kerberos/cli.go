@@ -4,9 +4,9 @@
 package kerberos
 
 import (
-	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -195,39 +195,21 @@ func GetAuthHeaderVal(loginCfg *LoginCfg) (string, error) {
 	}
 
 	cl := client.NewWithKeytab(loginCfg.Username, loginCfg.Realm, kt, krb5Conf, settings...)
-	if err := cl.Login(); err != nil {
-		return "", fmt.Errorf("couldn't log in: %w", err)
-	}
 	defer cl.Destroy()
 
-	spnegoClient := spnego.SPNEGOClient(cl, loginCfg.Service)
-	if err := spnegoClient.AcquireCred(); err != nil {
-		return "", fmt.Errorf("couldn't acquire client credential: %w", err)
+	r := &http.Request{Header: http.Header{}}
+	if err := spnego.SetSPNEGOHeader(cl, r, loginCfg.Service); err != nil {
+		return "", fmt.Errorf("couldn't build SPNEGO token: %w", err)
 	}
-
-	spnegoToken, err := spnegoClient.InitSecContext()
-	if err != nil {
-		return "", fmt.Errorf("couldn't initialize context: %w", err)
-	}
-
-	marshalledToken, err := spnegoToken.Marshal()
-	if err != nil {
-		return "", fmt.Errorf("couldn't marshal SPNEGO: %w", err)
-	}
-	authHeaderVal := "Negotiate " + base64.StdEncoding.EncodeToString(marshalledToken)
-	return authHeaderVal, nil
+	return r.Header.Get(spnego.HTTPHeaderAuthRequest), nil
 }
 
 func removeInstanceNameFromKeytab(kt *keytab.Keytab) {
-	for index := range kt.Entries {
-		user := splitUsername(kt.Entries[index].Principal.String())
-		if len(user) > 1 {
-			kt.Entries[index].Principal.Components = []string{user[0]}
-			kt.Entries[index].Principal.NumComponents = int16(len(kt.Entries[index].Principal.Components))
+	for i := range kt.Entries {
+		p := &kt.Entries[i].Principal
+		if len(p.Components) > 1 {
+			p.Components = p.Components[:1]
+			p.NumComponents = 1
 		}
 	}
-}
-
-func splitUsername(username string) []string {
-	return strings.Split(username, "/")
 }

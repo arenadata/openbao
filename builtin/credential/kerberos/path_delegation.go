@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
+	goidentity "github.com/go-krb5/x/identity"
 	"github.com/openbao/openbao/sdk/v2/framework"
 	"github.com/openbao/openbao/sdk/v2/logical"
-	"gopkg.in/jcmturner/goidentity.v3"
 )
 
 const (

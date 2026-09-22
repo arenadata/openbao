@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jcmturner/gokrb5/v8/keytab"
+	"github.com/go-krb5/krb5/keytab"
 	"github.com/openbao/openbao/sdk/v2/logical"
 )
 

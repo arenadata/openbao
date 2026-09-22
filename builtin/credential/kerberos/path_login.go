@@ -13,18 +13,18 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/go-krb5/krb5/keytab"
+	"github.com/go-krb5/krb5/service"
+	"github.com/go-krb5/krb5/spnego"
+	goidentity "github.com/go-krb5/x/identity"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-secure-stdlib/strutil"
 	"github.com/hashicorp/go-sockaddr"
-	"github.com/jcmturner/gokrb5/v8/keytab"
-	"github.com/jcmturner/gokrb5/v8/service"
-	"github.com/jcmturner/gokrb5/v8/spnego"
 	"github.com/openbao/openbao/sdk/v2/framework"
 	"github.com/openbao/openbao/sdk/v2/helper/cidrutil"
 	"github.com/openbao/openbao/sdk/v2/helper/ldaputil"
 	"github.com/openbao/openbao/sdk/v2/helper/policyutil"
 	"github.com/openbao/openbao/sdk/v2/logical"
-	"gopkg.in/jcmturner/goidentity.v3"
 )
 
 func (b *backend) pathLogin() *framework.Path {

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jcmturner/gokrb5/v8/keytab"
+	"github.com/go-krb5/krb5/keytab"
 )
 
 func TestCLI_RemoveInstanceName(t *testing.T) {

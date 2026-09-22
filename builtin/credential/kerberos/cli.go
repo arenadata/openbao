@@ -10,10 +10,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jcmturner/gokrb5/v8/client"
-	"github.com/jcmturner/gokrb5/v8/config"
-	"github.com/jcmturner/gokrb5/v8/keytab"
-	"github.com/jcmturner/gokrb5/v8/spnego"
+	"github.com/go-krb5/krb5/client"
+	"github.com/go-krb5/krb5/config"
+	"github.com/go-krb5/krb5/keytab"
+	"github.com/go-krb5/krb5/spnego"
 	"github.com/openbao/openbao/api/v2"
 )
 

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	goidentity "github.com/go-krb5/x/identity"
 	"github.com/openbao/openbao/sdk/v2/logical"
-	"gopkg.in/jcmturner/goidentity.v3"
 )
 
 func doRequest(t *testing.T, b logical.Backend, storage logical.Storage, op logical.Operation, path string, data map[string]interface{}) (*logical.Response, error) {

@@ -195,9 +195,16 @@ func testKeytab(t *testing.T) (*keytab.Keytab, string) {
 // into a SPNEGO Authorization header value, standing in for a KDC.
 func mintNegotiate(t *testing.T, kt *keytab.Keytab, principal string) string {
 	t.Helper()
-	cl := client.NewWithPassword(principal, testRealm, "unused", config.New())
+	return mintNegotiateRealm(t, kt, principal, testRealm)
+}
+
+// mintNegotiateRealm is mintNegotiate for a client from realm, as a
+// cross-realm trust would present it.
+func mintNegotiateRealm(t *testing.T, kt *keytab.Keytab, principal, realm string) string {
+	t.Helper()
+	cl := client.NewWithPassword(principal, realm, "unused", config.New())
 	now := time.Now().UTC()
-	tkt, sessionKey, err := messages.NewTicket(cl.Credentials.CName(), testRealm,
+	tkt, sessionKey, err := messages.NewTicket(cl.Credentials.CName(), realm,
 		types.NewPrincipalName(nametype.KRB_NT_SRV_INST, testServiceSPN), testRealm,
 		types.NewKrbFlags(), kt, etypeID.AES256_CTS_HMAC_SHA1_96, 1,
 		now, now, now.Add(time.Hour), now.Add(2*time.Hour))

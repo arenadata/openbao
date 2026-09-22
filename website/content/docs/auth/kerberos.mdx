@@ -168,6 +168,90 @@ The `service_account` in `config` still has to own the service principal the
 client asks a ticket for (usually `HTTP/<openbao-host>`), and the keytab has
 to hold that account's key with the current KVNO.
 
+## Delegation tokens
+
+Processes started by a Kerberos-authenticated job often have no Kerberos
+credentials of their own: YARN containers, Spark executors, Tez tasks. Hadoop
+solves this with delegation tokens, and the auth method can issue them: a
+principal that authenticates with SPNEGO obtains a token, hands it to those
+processes through the Hadoop `Credentials` machinery, and they log in to
+OpenBao with the token alone. The token is byte-compatible with Hadoop's
+`AbstractDelegationTokenIdentifier` and `Token`, so `Token.decodeIdentifier()`,
+credential files, the YARN `TokenRenewer` service and Spark's delegation token
+framework handle it without conversion.
+
+Delegation tokens require the roles configuration above and are enabled by
+writing `config/delegation`; every parameter has a default:
+
+```shell-session
+$ bao write auth/kerberos/config/delegation \
+    renew_interval=24h \
+    max_lifetime=168h \
+    key_rotation_interval=24h \
+    cleanup_interval=1h \
+    token_kind=OPENBAO_DELEGATION_TOKEN
+```
+
+A token has two lifetimes, as in Hadoop: an `expiry` that a renewal pushes
+forward by `renew_interval`, and a `max_date`, `max_lifetime` after issuance,
+that nothing extends. `token_kind` is written into every token and must match
+the kind of the `TokenIdentifier` class on the Hadoop side.
+
+The endpoints under `delegation/` take the same `Authorization: Negotiate`
+header as `login`; a delegation token can never be used to obtain another one.
+
+```shell-session
+$ curl \
+    --header "Authorization: Negotiate YIIFSw...sWw" \
+    --request POST \
+    --data '{"renewer": "yarn", "service": "openbao.example.com:8200"}' \
+    https://openbao.example.com:8200/v1/auth/kerberos/delegation/token
+```
+
+- `renewer` names who may renew the token, usually the short name of the
+  YARN ResourceManager principal. It is compared with the renewing
+  principal's full name and, for callers from the owner's realm only, with
+  its `primary/instance` and its primary alone.
+  Without a renewer the token expires after one `renew_interval`.
+- `service` is copied into the token's service field so the Hadoop client can
+  find it in the job credentials; OpenBao does not interpret it.
+- `max_lifetime` requests a shorter hard lifetime than the configured one.
+- `role` selects the role as at login; without it exactly one role must match
+  the principal. The role is fixed in the token record and is the one a later
+  login uses.
+
+The response carries the token in `token`, the Hadoop URL string form of
+`Token` (`Token.decodeFromUrlString()` reads it), together with its owner,
+renewer, dates and sequence number.
+
+A holder logs in without SPNEGO:
+
+```shell-session
+$ bao write auth/kerberos/login delegation_token=KAARYWxpY2...
+```
+
+The OpenBao token carries the policies and parameters of the role recorded at
+issuance, the entity alias is the token's owner, and `delegation_token` in
+the metadata names the sequence number. Its explicit max TTL is capped by the
+delegation token's remaining time to `expiry`, and it renews only while the
+delegation token is still valid. Cancelling a delegation token does not revoke
+OpenBao tokens already issued from it; they run out at their TTL.
+
+`delegation/renew` and `delegation/cancel` take the token in `token`. Only the
+renewer may renew, and the new `expiry` is `renew_interval` ahead, never past
+`max_date`. The owner or the renewer may cancel; from then on the token fails
+to log in or renew, which is how a job's tokens are retired when the
+application finishes.
+
+Tokens are signed with a random key that rotates every
+`key_rotation_interval`; a key is kept while a token signed with it exists,
+so rotation never breaks a live token. Every `cleanup_interval` the active
+node deletes expired tokens and keys no token references. Deleting
+`config/delegation` disables the feature and removes every token and key.
+
+A delegation token is a bearer credential: transport it only over TLS and
+treat job credential files as secrets.
+
 ## Authentication
 
 From a client machine with a valid `krb5.conf` and `keytab`, perform a command

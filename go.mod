@@ -23,7 +23,7 @@ replace github.com/openbao/openbao/sdk/v2 => ./sdk
 
 replace github.com/boltdb/bolt => ./helper/stubbolt
 
-replace github.com/go-krb5/krb5 => github.com/arenadata/go-krb5 v0.1.1-2.3.0-0
+replace github.com/go-krb5/krb5 => github.com/arenadata/go-krb5 v0.1.1-2.3.0-1
 
 require (
 	cloud.google.com/go/monitoring v1.24.3

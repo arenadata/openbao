@@ -54,6 +54,14 @@ const SUPPORTED_AUTH_BACKENDS = [
     displayNamePath: 'metadata.username',
     formAttributes: ['username', 'password'],
   },
+  {
+    type: 'kerberos',
+    typeDisplay: 'Kerberos',
+    description: 'Authenticate with the Kerberos ticket of your browser session.',
+    tokenPath: 'client_token',
+    displayNamePath: 'metadata.user',
+    formAttributes: ['role'],
+  },
 ];
 
 export function supportedAuthBackends() {

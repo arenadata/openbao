@@ -13,6 +13,7 @@ import authPage from 'vault/tests/pages/auth';
 import logout from 'vault/tests/pages/logout';
 import enablePage from 'vault/tests/pages/settings/auth/enable';
 import { supportedAuthBackends } from 'vault/helpers/supported-auth-backends';
+import { methods as mountableAuthMethods } from 'vault/helpers/mountable-auth-methods';
 import { supportedManagedAuthBackends } from 'vault/helpers/supported-managed-auth-backends';
 import { create } from 'ember-cli-page-object';
 import consoleClass from 'vault/tests/pages/components/console/ui-panel';
@@ -93,11 +94,16 @@ module('Acceptance | auth backend list', function (hooks) {
     await visit('/vault/access');
 
     const supportManaged = supportedManagedAuthBackends();
+    const mountable = mountableAuthMethods().map((m) => m.type);
     const backends = supportedAuthBackends();
     for (const backend of backends) {
       const { type } = backend;
       const path = `auth-list-${type}-${uid}`;
       if (type !== 'token') {
+        // sign-in only methods (kerberos) are enabled and configured outside the UI
+        if (!mountable.includes(type)) {
+          continue;
+        }
         await enablePage.enable(type, path);
       }
       await settled();

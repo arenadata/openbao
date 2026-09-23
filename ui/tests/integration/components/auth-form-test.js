@@ -192,6 +192,39 @@ module('Integration | Component | auth form', function (hooks) {
     server.shutdown();
   });
 
+  test('it sends the role and the mount path for kerberos', async function (assert) {
+    this.owner.unregister('service:auth');
+    this.owner.register('service:auth', workingAuthService);
+    this.auth = this.owner.lookup('service:auth');
+    const authSpy = sinon.spy(this.auth, 'authenticate');
+    const methods = {
+      'kerb/': {
+        type: 'kerberos',
+      },
+    };
+    const server = new Pretender(function () {
+      this.get('/v1/sys/internal/ui/mounts', () => {
+        return [200, { 'Content-Type': 'application/json' }, JSON.stringify({ data: { auth: methods } })];
+      });
+    });
+
+    this.set('cluster', EmberObject.create({}));
+    this.set('selectedAuth', 'kerb/');
+    await render(hbs`{{auth-form cluster=this.cluster selectedAuth=this.selectedAuth}}`);
+    assert.dom('[data-test-kerberos-help]').exists('explains that the browser ticket is used');
+    assert.dom('[data-test-username]').doesNotExist('asks for no username');
+    await component.role('hadoop');
+    await component.login();
+
+    await settled();
+    assert.ok(authSpy.calledOnce, 'a call to authenticate was made');
+    const { backend, data } = authSpy.getCall(0).args[0];
+    assert.strictEqual(backend, 'kerberos', 'authenticates with the kerberos backend');
+    assert.deepEqual(data, { role: 'hadoop', path: 'kerb' }, 'sends the role and the mount path');
+    authSpy.restore();
+    server.shutdown();
+  });
+
   test('it renders no tabs when no supported methods are present in passed methods', async function (assert) {
     const methods = {
       'approle/': {
@@ -312,7 +345,7 @@ module('Integration | Component | auth form', function (hooks) {
     await render(hbs`<AuthForm @cluster={{this.cluster}} />`);
 
     await component.selectMethod('oidc');
-    await component.oidcRole('foo');
+    await component.role('foo');
     await component.oidcMoreOptions();
     await component.oidcMountPath('foo-oidc');
     await component.login();

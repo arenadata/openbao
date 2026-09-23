@@ -89,6 +89,9 @@ export default ApplicationAdapter.extend({
       };
     } else if (backend === 'jwt' || backend === 'oidc') {
       options.data = { role, jwt };
+    } else if (backend === 'kerberos') {
+      // the browser answers the server's Negotiate challenge itself
+      options.data = role ? { role } : {};
     } else {
       options.data = token ? { token, password } : { password };
     }
@@ -133,6 +136,7 @@ export default ApplicationAdapter.extend({
     const authURLs = {
       jwt: 'login',
       oidc: 'login',
+      kerberos: 'login',
       userpass: `login/${encodeURIComponent(username)}`,
       ldap: `login/${encodeURIComponent(username)}`,
       radius: `login/${encodeURIComponent(username)}`,

@@ -120,6 +120,28 @@
                 />
               </div>
             </div>
+          {{else if (eq this.providerName "kerberos")}}
+            <p class="help has-text-grey has-bottom-margin-s" data-test-kerberos-help>
+              Signs in with the Kerberos ticket of your session. The browser must be allowed to negotiate with this host.
+            </p>
+            <div class="field">
+              <label for="role" class="is-label">Role</label>
+              <div class="control">
+                <Input
+                  @value={{this.role}}
+                  name="role"
+                  id="role"
+                  class="input"
+                  autocomplete="off"
+                  spellcheck="false"
+                  data-test-role={{true}}
+                />
+              </div>
+              <p class="help has-text-grey">
+                Optional: without it exactly one role must match your principal. Leave it empty for a method configured with
+                LDAP.
+              </p>
+            </div>
           {{else}}
             <div class="field">
               <label for="username" class="is-label">Username</label>

@@ -295,6 +295,30 @@ $ bao login -method=kerberos \
   through roles instead of LDAP. It restricts the login to the named role;
   without it exactly one role must match the principal.
 
+## Web UI
+
+The UI signs in with the Kerberos ticket of the browser session: it posts to
+`auth/<mount>/login` with no credentials, the server answers `401` with
+`WWW-Authenticate: Negotiate`, and the browser repeats the request with a
+SPNEGO token. Pick **Kerberos** in the method drop-down, optionally enter a role,
+and sign in. The drop-down uses the default mount path `auth/kerberos`; for a
+method mounted elsewhere enter its path under *More options*, or make the mount
+its own tab on the login page with `bao auth tune -listing-visibility=unauth <path>`.
+
+What the browser needs:
+
+- a valid ticket for the realm, from `kinit` or the workstation's domain login;
+- permission to negotiate with the OpenBao host: Chrome and Edge read the
+  `AuthServerAllowlist` policy, Firefox the `network.negotiate-auth.trusted-uris`
+  preference. Without it the browser ignores the challenge and the UI reports
+  `authentication required`;
+- the UI opened by the host name in the service principal, not by IP address,
+  because the browser requests a ticket for `HTTP/<host>`.
+
+The mount must pass the `Authorization` and `WWW-Authenticate` headers through,
+as shown under [Configuration](#configuration). Enabling and configuring the
+method (the keytab upload) stays with the CLI or API; the UI covers signing in.
+
 ## Troubleshooting
 
 ### Identify the malfunctioning piece

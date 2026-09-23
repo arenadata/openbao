@@ -276,8 +276,9 @@ $ bao login -method=kerberos \
   logging into Kerberos. With LDAP configured this username must match a
   service account in LDAP.
 - `service` is the service principal name to use in obtaining a service ticket for
-  gaining a SPNEGO token. It must belong to the `service_account` configured on
-  the auth method.
+  gaining a SPNEGO token. It defaults to `HTTP/<host>` of the server address,
+  the principal `curl --negotiate` and browsers request; a keytab entry for it
+  must exist on the auth method (the `service_account` entry when that is set).
 - `realm` is the name of the Kerberos realm. With LDAP configured this realm
   must match the UPNDomain configured on the LDAP connection. This check is
   case-sensitive.

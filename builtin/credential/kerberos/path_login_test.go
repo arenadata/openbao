@@ -202,10 +202,16 @@ func mintNegotiate(t *testing.T, kt *keytab.Keytab, principal string) string {
 // cross-realm trust would present it.
 func mintNegotiateRealm(t *testing.T, kt *keytab.Keytab, principal, realm string) string {
 	t.Helper()
+	return mintNegotiateService(t, kt, principal, realm, testServiceSPN)
+}
+
+// mintNegotiateService is mintNegotiateRealm for a ticket issued to spn.
+func mintNegotiateService(t *testing.T, kt *keytab.Keytab, principal, realm, spn string) string {
+	t.Helper()
 	cl := client.NewWithPassword(principal, realm, "unused", config.New())
 	now := time.Now().UTC()
 	tkt, sessionKey, err := messages.NewTicket(cl.Credentials.CName(), realm,
-		types.NewPrincipalName(nametype.KRB_NT_SRV_INST, testServiceSPN), testRealm,
+		types.NewPrincipalName(nametype.KRB_NT_SRV_INST, spn), testRealm,
 		types.NewKrbFlags(), kt, etypeID.AES256_CTS_HMAC_SHA1_96, 1,
 		now, now, now.Add(time.Hour), now.Add(2*time.Hour))
 	if err != nil {
@@ -301,11 +307,8 @@ func TestLogin_RolesEndToEnd(t *testing.T) {
 		Headers:    map[string][]string{"Authorization": {mintNegotiate(t, other, "hadoop/nn1.example.com")}},
 		Connection: &logical.Connection{RemoteAddr: "10.1.2.3"},
 	})
-	if err != nil || resp == nil || resp.Auth != nil {
-		t.Fatalf("forged ticket: expected rejection, got err %v resp %#v", err, resp)
-	}
-	if code, ok := resp.Data[logical.HTTPStatusCode]; !ok || code == 200 {
-		t.Fatalf("forged ticket: expected non-200 status, got %#v", resp.Data)
+	if coded, ok := err.(logical.HTTPCodedError); !ok || coded.Code() != 401 || resp == nil || resp.Auth != nil {
+		t.Fatalf("forged ticket: expected a 401 error, got err %v resp %#v", err, resp)
 	}
 }
 

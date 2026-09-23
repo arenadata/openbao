@@ -32,8 +32,11 @@ func (b *backend) pathConfig() *framework.Path {
 				},
 			},
 			"service_account": {
-				Type:        framework.TypeString,
-				Description: `Service Account`,
+				Type: framework.TypeString,
+				Description: `Keytab entry that decrypts every service ticket, for keytabs
+whose entry name differs from the service principal clients request. Empty
+selects the entry named by each ticket's service principal, so one keytab may
+serve several principals.`,
 			},
 			"add_group_aliases": {
 				Type: framework.TypeBool,
@@ -84,9 +87,6 @@ func (b *backend) pathConfigRead(ctx context.Context, req *logical.Request, data
 
 func (b *backend) pathConfigWrite(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
 	serviceAccount := data.Get("service_account").(string)
-	if serviceAccount == "" {
-		return logical.ErrorResponse("data does not contain service_account"), logical.ErrInvalidRequest
-	}
 
 	kt := data.Get("keytab").(string)
 	if kt == "" {

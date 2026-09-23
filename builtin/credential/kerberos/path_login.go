@@ -159,8 +159,8 @@ func (b *backend) pathLoginUpdate(ctx context.Context, req *logical.Request, d *
 
 // negotiate verifies the SPNEGO token from the Authorization header or the
 // authorization field. Without a Negotiate token it answers with the 401
-// challenge; on failure the response carries the SPNEGO status and the
-// response and error are to be returned as is.
+// challenge; on failure the error carries the reason with the status code and
+// the response and error are to be returned as is.
 func (b *backend) negotiate(ctx context.Context, req *logical.Request, d *framework.FieldData, kerbCfg *kerberosConfig) (goidentity.Identity, *logical.Response, error) {
 	authorizationString := authorizationValue(req, d)
 	if !isNegotiate(authorizationString) {
@@ -179,11 +179,12 @@ func (b *backend) negotiate(ctx context.Context, req *logical.Request, d *framew
 
 	identity, code, message := b.spnegoAuthenticate(req, kerbCfg, kt, authorizationString)
 	if identity == nil {
-		resp := &logical.Response{
-			Warnings: []string{message},
+		b.Logger().Info("spnego authentication failed", "remote_addr", remoteAddr(req), "reason", message)
+		resp := &logical.Response{}
+		if code == http.StatusUnauthorized {
+			resp.Headers = map[string][]string{"www-authenticate": {"Negotiate"}}
 		}
-		resp, err := logical.RespondWithStatusCode(resp, req, code)
-		return nil, resp, err
+		return nil, resp, logical.CodedError(code, message)
 	}
 	return identity, nil, nil
 }
@@ -229,15 +230,15 @@ func (b *backend) spnegoAuthenticate(req *logical.Request, kerbCfg *kerberosConf
 	// and a PAC the library cannot verify must not fail the login.
 	settings := []func(*service.Settings){
 		service.Logger(l),
-		service.KeytabPrincipal(kerbCfg.ServiceAccount),
 		service.DecodePAC(false),
+	}
+	if kerbCfg.ServiceAccount != "" {
+		settings = append(settings, service.KeytabPrincipal(kerbCfg.ServiceAccount))
 	}
 	// The client address is compared with the ticket's addresses when the
 	// ticket carries any.
-	if req.Connection != nil {
-		if ip := net.ParseIP(req.Connection.RemoteAddr); ip != nil {
-			settings = append(settings, service.ClientAddress(types.HostAddressFromNetIP(ip)))
-		}
+	if ip := net.ParseIP(remoteAddr(req)); ip != nil {
+		settings = append(settings, service.ClientAddress(types.HostAddressFromNetIP(ip)))
 	}
 
 	token, err := parseSPNEGOToken(authorization)
@@ -262,6 +263,14 @@ func (b *backend) spnegoAuthenticate(req *logical.Request, kerbCfg *kerberosConf
 	}
 	b.Logger().Debug("spnego identity", "user", creds.UserName(), "domain", creds.Domain())
 	return creds, http.StatusOK, ""
+}
+
+// remoteAddr is the caller's address, empty when the request carries none.
+func remoteAddr(req *logical.Request) string {
+	if req.Connection == nil {
+		return ""
+	}
+	return req.Connection.RemoteAddr
 }
 
 // parseSPNEGOToken decodes a Negotiate header value. A raw KRB5 AP-REQ, which

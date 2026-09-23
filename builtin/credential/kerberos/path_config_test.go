@@ -78,10 +78,6 @@ func TestConfig_RejectsBadWrites(t *testing.T) {
 	b, storage := getTestBackend(t)
 
 	testConfigWriteError(t, b, storage, map[string]interface{}{
-		"keytab": testValidKeytab,
-	}, "data does not contain service_account")
-
-	testConfigWriteError(t, b, storage, map[string]interface{}{
 		"service_account": "testuser",
 	}, "data does not contain keytab")
 
@@ -123,3 +119,12 @@ var (
 	testNotBase64Keytab string = "NOT_VALID_BASE64"
 	testInvalidKeytab   string = "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"
 )
+
+func TestConfig_ServiceAccountOptional(t *testing.T) {
+	b, storage := getTestBackend(t)
+	mustRequest(t, b, storage, logical.UpdateOperation, configPath, map[string]interface{}{"keytab": testValidKeytab})
+	resp := mustRequest(t, b, storage, logical.ReadOperation, configPath, nil)
+	if got := resp.Data["service_account"]; got != "" {
+		t.Fatalf("service_account: want empty, got %#v", got)
+	}
+}

@@ -159,8 +159,8 @@ func (b *backend) pathLoginUpdate(ctx context.Context, req *logical.Request, d *
 
 // negotiate verifies the SPNEGO token from the Authorization header or the
 // authorization field. Without a Negotiate token it answers with the 401
-// challenge; on failure the response carries the SPNEGO status and the
-// response and error are to be returned as is.
+// challenge; on failure the error carries the reason with the status code and
+// the response and error are to be returned as is.
 func (b *backend) negotiate(ctx context.Context, req *logical.Request, d *framework.FieldData, kerbCfg *kerberosConfig) (goidentity.Identity, *logical.Response, error) {
 	authorizationString := authorizationValue(req, d)
 	if !isNegotiate(authorizationString) {
@@ -179,11 +179,11 @@ func (b *backend) negotiate(ctx context.Context, req *logical.Request, d *framew
 
 	identity, code, message := b.spnegoAuthenticate(req, kerbCfg, kt, authorizationString)
 	if identity == nil {
-		resp := &logical.Response{
-			Warnings: []string{message},
+		resp := &logical.Response{}
+		if code == http.StatusUnauthorized {
+			resp.Headers = map[string][]string{"www-authenticate": {"Negotiate"}}
 		}
-		resp, err := logical.RespondWithStatusCode(resp, req, code)
-		return nil, resp, err
+		return nil, resp, logical.CodedError(code, message)
 	}
 	return identity, nil, nil
 }

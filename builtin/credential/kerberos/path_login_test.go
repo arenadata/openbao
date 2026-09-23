@@ -307,11 +307,8 @@ func TestLogin_RolesEndToEnd(t *testing.T) {
 		Headers:    map[string][]string{"Authorization": {mintNegotiate(t, other, "hadoop/nn1.example.com")}},
 		Connection: &logical.Connection{RemoteAddr: "10.1.2.3"},
 	})
-	if err != nil || resp == nil || resp.Auth != nil {
-		t.Fatalf("forged ticket: expected rejection, got err %v resp %#v", err, resp)
-	}
-	if code, ok := resp.Data[logical.HTTPStatusCode]; !ok || code == 200 {
-		t.Fatalf("forged ticket: expected non-200 status, got %#v", resp.Data)
+	if coded, ok := err.(logical.HTTPCodedError); !ok || coded.Code() != 401 || resp == nil || resp.Auth != nil {
+		t.Fatalf("forged ticket: expected a 401 error, got err %v resp %#v", err, resp)
 	}
 }
 

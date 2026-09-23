@@ -6,7 +6,6 @@ package kerberos
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -79,22 +78,15 @@ func TestLogin_TokenVariants(t *testing.T) {
 	}
 	assertRejected := func(t *testing.T, resp *logical.Response, err error, reason string) {
 		t.Helper()
-		if err != nil || resp == nil || resp.Auth != nil {
-			t.Fatalf("expected rejection, got err %v resp %#v", err, resp)
+		coded, ok := err.(logical.HTTPCodedError)
+		if !ok || coded.Code() != 401 {
+			t.Fatalf("expected a 401 error, got err %v resp %#v", err, resp)
 		}
-		if code, ok := resp.Data[logical.HTTPStatusCode]; !ok || code != 401 {
-			t.Fatalf("expected 401, got %#v", resp.Data)
+		if !strings.Contains(coded.Error(), reason) {
+			t.Fatalf("expected error containing %q, got %q", reason, coded.Error())
 		}
-		// RespondWithStatusCode moves the response into the raw body.
-		body, _ := resp.Data[logical.HTTPRawBody].(string)
-		var decoded struct {
-			Warnings []string `json:"warnings"`
-		}
-		if err := json.Unmarshal([]byte(body), &decoded); err != nil {
-			t.Fatalf("decoding raw body %q: %v", body, err)
-		}
-		if len(decoded.Warnings) != 1 || !strings.Contains(decoded.Warnings[0], reason) {
-			t.Fatalf("expected warning containing %q, got %#v", reason, decoded.Warnings)
+		if resp == nil || resp.Auth != nil || len(resp.Headers["www-authenticate"]) != 1 || resp.Headers["www-authenticate"][0] != "Negotiate" {
+			t.Fatalf("expected a Negotiate challenge without auth, got %#v", resp)
 		}
 	}
 	negotiateFor := func(mechToken []byte, mech asn1.ObjectIdentifier) string {
@@ -189,8 +181,8 @@ func TestLogin_MultiplePrincipalsInKeytab(t *testing.T) {
 			t.Fatalf("pinned entry: err %v resp %#v", err, resp)
 		}
 		resp, err = login(b, storage, otherSPN)
-		if err != nil || resp == nil || resp.Auth != nil {
-			t.Fatalf("other entry: expected rejection, got err %v resp %#v", err, resp)
+		if coded, ok := err.(logical.HTTPCodedError); !ok || coded.Code() != 401 || resp == nil || resp.Auth != nil {
+			t.Fatalf("other entry: expected a 401 error, got err %v resp %#v", err, resp)
 		}
 	})
 }

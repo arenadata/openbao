@@ -61,10 +61,6 @@ func main() {
 		fmt.Println(`"username" is required`)
 		os.Exit(1)
 	}
-	if service == "" {
-		fmt.Println(`"service" is required`)
-		os.Exit(1)
-	}
 	if realm == "" {
 		fmt.Println(`"realm" is required`)
 		os.Exit(1)
@@ -73,14 +69,16 @@ func main() {
 		fmt.Println(`"keytab_path" is required`)
 		os.Exit(1)
 	}
-	if krb5ConfPath == "" {
-		fmt.Println(`"krb5conf_path" is required`)
-		os.Exit(1)
-	}
 	if vaultAddr == "" {
 		vaultAddr = api.ReadBaoVariable("BAO_ADDR")
 		if vaultAddr == "" {
 			fmt.Println(`"vault_addr" is required`)
+			os.Exit(1)
+		}
+	}
+	if service == "" {
+		if service = kerberos.ServiceFromAddress(vaultAddr); service == "" {
+			fmt.Println(kerberos.ErrServiceRequired)
 			os.Exit(1)
 		}
 	}

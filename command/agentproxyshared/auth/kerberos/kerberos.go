@@ -20,34 +20,41 @@ import (
 type kerberosMethod struct {
 	logger    hclog.Logger
 	mountPath string
-	loginCfg  *kerberos.LoginCfg
+	loginCfg  kerberos.LoginCfg
 	role      string
 }
 
-func NewKerberosAuthMethod(conf *auth.AuthConfig) (auth.AuthMethod, error) {
+// NewKerberosAuthMethod reads the auto_auth config. A service left out is
+// the one clients of vaultAddress request, HTTP/<host>.
+func NewKerberosAuthMethod(conf *auth.AuthConfig, vaultAddress string) (auth.AuthMethod, error) {
 	if conf == nil {
 		return nil, errors.New("empty config")
 	}
 	if conf.Config == nil {
 		return nil, errors.New("empty config data")
 	}
-	username, err := read("username", conf.Config)
+	username, err := read("username", conf.Config, true)
 	if err != nil {
 		return nil, err
 	}
-	service, err := read("service", conf.Config)
+	service, err := read("service", conf.Config, false)
 	if err != nil {
 		return nil, err
 	}
-	realm, err := read("realm", conf.Config)
+	if service == "" {
+		if service = kerberos.ServiceFromAddress(vaultAddress); service == "" {
+			return nil, kerberos.ErrServiceRequired
+		}
+	}
+	realm, err := read("realm", conf.Config, true)
 	if err != nil {
 		return nil, err
 	}
-	keytabPath, err := read("keytab_path", conf.Config)
+	keytabPath, err := read("keytab_path", conf.Config, true)
 	if err != nil {
 		return nil, err
 	}
-	krb5ConfPath, err := read("krb5conf_path", conf.Config)
+	krb5ConfPath, err := read("krb5conf_path", conf.Config, false)
 	if err != nil {
 		return nil, err
 	}
@@ -61,19 +68,16 @@ func NewKerberosAuthMethod(conf *auth.AuthConfig) (auth.AuthMethod, error) {
 		}
 	}
 
-	role := ""
-	if roleRaw, ok := conf.Config["role"]; ok {
-		role, ok = roleRaw.(string)
-		if !ok {
-			return nil, errors.New("could not convert 'role' config value to string")
-		}
+	role, err := read("role", conf.Config, false)
+	if err != nil {
+		return nil, err
 	}
 
 	return &kerberosMethod{
 		logger:    conf.Logger,
 		mountPath: conf.MountPath,
 		role:      role,
-		loginCfg: &kerberos.LoginCfg{
+		loginCfg: kerberos.LoginCfg{
 			Username:               username,
 			Service:                service,
 			Realm:                  realm,
@@ -86,7 +90,7 @@ func NewKerberosAuthMethod(conf *auth.AuthConfig) (auth.AuthMethod, error) {
 
 func (k *kerberosMethod) Authenticate(context.Context, *api.Client) (string, http.Header, map[string]interface{}, error) {
 	k.logger.Trace("beginning authentication")
-	authHeaderVal, err := kerberos.GetAuthHeaderVal(k.loginCfg)
+	authHeaderVal, err := kerberos.GetAuthHeaderVal(&k.loginCfg)
 	if err != nil {
 		return "", nil, nil, err
 	}
@@ -106,11 +110,14 @@ func (k *kerberosMethod) NewCreds() chan struct{} { return nil }
 func (k *kerberosMethod) CredSuccess()            {}
 func (k *kerberosMethod) Shutdown()               {}
 
-// read reads a key from a map and convert its value to a string.
-func read(key string, m map[string]interface{}) (string, error) {
+// read returns the string at key; a missing key is an error only when required.
+func read(key string, m map[string]interface{}, required bool) (string, error) {
 	raw, ok := m[key]
 	if !ok {
-		return "", fmt.Errorf("%q is required", key)
+		if required {
+			return "", fmt.Errorf("%q is required", key)
+		}
+		return "", nil
 	}
 	v, ok := raw.(string)
 	if !ok {

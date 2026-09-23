@@ -268,7 +268,7 @@ $ bao login -method=kerberos \
 ```
 
 - `krb5conf_path` is the path to a valid `krb5.conf` file describing how to
-  communicate with the Kerberos environment.
+  communicate with the Kerberos environment. Defaults to `/etc/krb5.conf`.
 - `keytab_path` is the path to the `keytab` in which the entry lives for the
   entity authenticating to OpenBao. Keytab files should be protected from other
   users on a shared server using appropriate file permissions.

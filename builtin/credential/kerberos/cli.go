@@ -6,7 +6,9 @@ package kerberos
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -28,7 +30,7 @@ func (h *CLIHandler) Auth(c *api.Client, m map[string]string, nonInteractive boo
 	if !ok {
 		mount = "kerberos"
 	}
-	loginCfg, err := newLoginCfg(m)
+	loginCfg, err := newLoginCfg(m, serviceFromAddress(c.Address()))
 	if err != nil {
 		return nil, err
 	}
@@ -73,9 +75,10 @@ Usage: bao login -method=kerberos [CONFIG K=V...]
             keytab_path=/etc/krb5/krb5.keytab \
             krb5conf_path=/etc/krb5.conf
 
-  Example authentication with the ticket obtained by kinit:
+  Example authentication with the ticket obtained by kinit, against the
+  server in BAO_ADDR:
 
-      $ bao login -method=kerberos service="HTTP/ab10dfy3be7v.matrix.lan:8200"
+      $ bao login -method=kerberos
 
 Configuration:
 
@@ -98,6 +101,7 @@ Configuration:
 
   service=<string>
       The service principal name to use in obtaining a service ticket for gaining a SPNEGO token.
+      Defaults to HTTP/<host> of the server address.
 
   realm=<string>
       The name of the Kerberos realm. Required with keytab_path.
@@ -142,10 +146,25 @@ type LoginCfg struct {
 
 const defaultKrb5ConfPath = "/etc/krb5.conf"
 
+// serviceFromAddress derives the service principal clients of addr request,
+// HTTP/<host>, as curl and browsers do. An address without a host name gives
+// nothing: a ticket cannot be issued to an IP.
+func serviceFromAddress(addr string) string {
+	u, err := url.Parse(addr)
+	if err != nil {
+		return ""
+	}
+	host := u.Hostname()
+	if host == "" || net.ParseIP(host) != nil {
+		return ""
+	}
+	return "HTTP/" + host
+}
+
 // newLoginCfg validates the CLI options. A keytab_path selects the keytab
 // flow, which needs username and realm; otherwise the ticket in the
-// credential cache is used.
-func newLoginCfg(m map[string]string) (*LoginCfg, error) {
+// credential cache is used. defaultService stands in for a missing service.
+func newLoginCfg(m map[string]string, defaultService string) (*LoginCfg, error) {
 	cfg := &LoginCfg{
 		Username:     m["username"],
 		Service:      m["service"],
@@ -154,7 +173,10 @@ func newLoginCfg(m map[string]string) (*LoginCfg, error) {
 		Krb5ConfPath: m["krb5conf_path"],
 	}
 	if cfg.Service == "" {
-		return nil, errors.New(`"service" is required`)
+		cfg.Service = defaultService
+	}
+	if cfg.Service == "" {
+		return nil, errors.New(`"service" is required when the server address has no host name`)
 	}
 	if cfg.Krb5ConfPath == "" {
 		cfg.Krb5ConfPath = defaultKrb5ConfPath

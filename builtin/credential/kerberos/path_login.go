@@ -229,8 +229,10 @@ func (b *backend) spnegoAuthenticate(req *logical.Request, kerbCfg *kerberosConf
 	// and a PAC the library cannot verify must not fail the login.
 	settings := []func(*service.Settings){
 		service.Logger(l),
-		service.KeytabPrincipal(kerbCfg.ServiceAccount),
 		service.DecodePAC(false),
+	}
+	if kerbCfg.ServiceAccount != "" {
+		settings = append(settings, service.KeytabPrincipal(kerbCfg.ServiceAccount))
 	}
 	// The client address is compared with the ticket's addresses when the
 	// ticket carries any.

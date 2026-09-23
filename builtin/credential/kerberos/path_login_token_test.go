@@ -139,3 +139,58 @@ func TestLogin_TokenVariants(t *testing.T) {
 		assertRejected(t, resp, err, "unmarshalling SPNEGO token")
 	})
 }
+
+// TestLogin_MultiplePrincipalsInKeytab covers a keytab holding one entry per
+// node of an HA cluster: without service_account each ticket is decrypted
+// with the entry of the principal it was issued to.
+func TestLogin_MultiplePrincipalsInKeytab(t *testing.T) {
+	const otherSPN = "HTTP/node2.example.com"
+	kt := keytab.New()
+	for _, spn := range []string{testServiceSPN, otherSPN} {
+		if err := kt.AddEntry(spn, testRealm, spn+"-password", time.Now(), 1, etypeID.AES256_CTS_HMAC_SHA1_96); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := kt.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ktB64 := base64.StdEncoding.EncodeToString(raw)
+
+	login := func(b logical.Backend, storage logical.Storage, spn string) (*logical.Response, error) {
+		return b.HandleRequest(context.Background(), &logical.Request{
+			Operation:  logical.UpdateOperation,
+			Path:       "login",
+			Storage:    storage,
+			Data:       map[string]interface{}{},
+			Headers:    map[string][]string{"Authorization": {mintNegotiateService(t, kt, "hadoop/nn1.example.com", testRealm, spn)}},
+			Connection: &logical.Connection{RemoteAddr: "10.1.2.3"},
+		})
+	}
+
+	t.Run("no service_account: every entry works", func(t *testing.T) {
+		b, storage := getTestBackend(t)
+		mustRequest(t, b, storage, logical.UpdateOperation, configPath, map[string]interface{}{"keytab": ktB64})
+		writeRole(t, b, storage, "hadoop", map[string]interface{}{"bound_principals": "hadoop/*@" + testRealm})
+		for _, spn := range []string{testServiceSPN, otherSPN} {
+			resp, err := login(b, storage, spn)
+			if err != nil || resp == nil || resp.IsError() || resp.Auth == nil {
+				t.Fatalf("%s: err %v resp %#v", spn, err, resp)
+			}
+		}
+	})
+
+	t.Run("service_account pins one entry", func(t *testing.T) {
+		b, storage := getTestBackend(t)
+		mustRequest(t, b, storage, logical.UpdateOperation, configPath, map[string]interface{}{"keytab": ktB64, "service_account": testServiceSPN})
+		writeRole(t, b, storage, "hadoop", map[string]interface{}{"bound_principals": "hadoop/*@" + testRealm})
+		resp, err := login(b, storage, testServiceSPN)
+		if err != nil || resp == nil || resp.Auth == nil {
+			t.Fatalf("pinned entry: err %v resp %#v", err, resp)
+		}
+		resp, err = login(b, storage, otherSPN)
+		if err != nil || resp == nil || resp.Auth != nil {
+			t.Fatalf("other entry: expected rejection, got err %v resp %#v", err, resp)
+		}
+	})
+}

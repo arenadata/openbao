@@ -31,10 +31,13 @@ for verifying inbound SPNEGO tokens.
   of the Kerberos keytab that will be used for verifying inbound SPNEGO tokens.
   It should contain an entry matching the service account given. This can be
   created through the following command: `$ base64 openbao.keytab > openbao.keytab.base64`.
-- `service_account` `(string: <required>)` – The account owning the keytab
-  entry, and the service principal clients request tickets for. With LDAP
-  configured it is also the LDAP service account created for OpenBao. Ex.:
-  `"openbao_svc"`.
+- `service_account` `(string: "")` – The keytab entry used to decrypt every
+  service ticket, for keytabs whose entry name differs from the service
+  principal clients request (an Active Directory service account such as
+  `"openbao_svc"`). When empty, each ticket is decrypted with the entry named
+  by its own service principal, so one keytab can hold an entry per node of an
+  HA cluster. With LDAP configured it is also the LDAP service account created
+  for OpenBao.
 - `remove_instance_name` - Removes any instance names from a Kerberos service
   principal name when parsing the keytab file. For example when this is set to true,
   if a keytab has the service principal name `foo/localhost@example.com`, OpenBao

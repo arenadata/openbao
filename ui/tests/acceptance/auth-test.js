@@ -60,8 +60,8 @@ module('Acceptance | auth', function (hooks) {
   });
 
   test('it sends the right attributes when authenticating', async function (assert) {
-    assert.expect(6);
     const backends = supportedAuthBackends();
+    assert.expect(backends.length);
     await visit('/vault/auth');
     for (const backend of backends.reverse()) {
       await component.selectMethod(backend.type);
@@ -86,6 +86,8 @@ module('Acceptance | auth', function (hooks) {
         const authReq = this.server.passthroughRequests[this.server.passthroughRequests.length - 2];
         body = JSON.parse(authReq.requestBody);
         assert.ok(Object.keys(body).includes('role'), `${backend.type} includes role`);
+      } else if (backend.type === 'kerberos') {
+        assert.deepEqual(body, {}, 'kerberos sends an empty body and leaves the ticket to the browser');
       } else {
         assert.ok(Object.keys(body).includes('password'), `${backend.type} includes password`);
       }

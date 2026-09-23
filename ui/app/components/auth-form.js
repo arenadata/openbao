@@ -39,6 +39,7 @@ const DEFAULTS = {
   token: null,
   username: null,
   password: null,
+  role: null,
   customPath: null,
 };
 

@@ -6,8 +6,8 @@ package kerberos
 import (
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
@@ -30,7 +30,7 @@ func (h *CLIHandler) Auth(c *api.Client, m map[string]string, nonInteractive boo
 	if !ok {
 		mount = "kerberos"
 	}
-	loginCfg, err := newLoginCfg(m, serviceFromAddress(c.Address()))
+	loginCfg, err := newLoginCfg(m, ServiceFromAddress(c.Address()))
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +125,14 @@ Configuration:
 // bugs related to incorrectly ordering the strings being passed into
 // GetAuthHeaderVal.
 type LoginCfg struct {
-	Username, Service, Realm, KeytabPath, Krb5ConfPath string
+	Username, Realm, KeytabPath string
+
+	// Service is the principal the ticket is requested for; callers derive a
+	// missing one with ServiceFromAddress.
+	Service string
+
+	// Krb5ConfPath is the krb5.conf to load; empty means /etc/krb5.conf.
+	Krb5ConfPath string
 
 	// CCachePath is the credential cache used when KeytabPath is empty;
 	// empty means KRB5CCNAME, then /tmp/krb5cc_<uid>.
@@ -144,18 +151,27 @@ type LoginCfg struct {
 	RemoveInstanceName bool
 }
 
-const defaultKrb5ConfPath = "/etc/krb5.conf"
+// defaultKrb5ConfPath is a variable so tests can point it at a fixture.
+var defaultKrb5ConfPath = "/etc/krb5.conf"
 
-// serviceFromAddress derives the service principal clients of addr request,
-// HTTP/<host>, as curl and browsers do. An address without a host name gives
-// nothing: a ticket cannot be issued to an IP.
-func serviceFromAddress(addr string) string {
+// ErrServiceRequired is returned when neither the caller nor the server
+// address names the service principal.
+var ErrServiceRequired = errors.New(`"service" is required when the server address has no host name`)
+
+// ServiceFromAddress derives the service principal clients of addr request,
+// HTTP/<host>, as curl and browsers do: the host lower-cased and without a
+// trailing dot. An address without a host name gives nothing: a ticket
+// cannot be issued to an IP.
+func ServiceFromAddress(addr string) string {
 	u, err := url.Parse(addr)
 	if err != nil {
 		return ""
 	}
-	host := u.Hostname()
-	if host == "" || net.ParseIP(host) != nil {
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	if host == "" {
+		return ""
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
 		return ""
 	}
 	return "HTTP/" + host
@@ -174,12 +190,6 @@ func newLoginCfg(m map[string]string, defaultService string) (*LoginCfg, error) 
 	}
 	if cfg.Service == "" {
 		cfg.Service = defaultService
-	}
-	if cfg.Service == "" {
-		return nil, errors.New(`"service" is required when the server address has no host name`)
-	}
-	if cfg.Krb5ConfPath == "" {
-		cfg.Krb5ConfPath = defaultKrb5ConfPath
 	}
 
 	if cfg.KeytabPath != "" {
@@ -240,7 +250,14 @@ func ccachePath(explicit string) (string, error) {
 // and returns the value for the "Authorization" header that should be
 // provided to Vault for a successful SPNEGO login.
 func GetAuthHeaderVal(loginCfg *LoginCfg) (string, error) {
-	krb5Conf, err := config.Load(loginCfg.Krb5ConfPath)
+	if loginCfg.Service == "" {
+		return "", ErrServiceRequired
+	}
+	krb5ConfPath := loginCfg.Krb5ConfPath
+	if krb5ConfPath == "" {
+		krb5ConfPath = defaultKrb5ConfPath
+	}
+	krb5Conf, err := config.Load(krb5ConfPath)
 	if err != nil {
 		return "", fmt.Errorf("couldn't parse krb5Conf: %w", err)
 	}

@@ -35,7 +35,7 @@ func GetAutoAuthMethodFromConfig(autoAuthMethodType string, authConfig *auth.Aut
 	case "jwt":
 		return jwt.NewJWTAuthMethod(authConfig)
 	case "kerberos":
-		return kerberos.NewKerberosAuthMethod(authConfig)
+		return kerberos.NewKerberosAuthMethod(authConfig, vaultAddress)
 	case "kubernetes":
 		return kubernetes.NewKubernetesAuthMethod(authConfig)
 	case "approle":

@@ -88,6 +88,11 @@ func TestCLI_LoginCfg(t *testing.T) {
 			opts: map[string]string{"service": "HTTP/bao.example.com"},
 			want: LoginCfg{Service: "HTTP/bao.example.com", CCachePath: uidCache, Krb5ConfPath: defaultKrb5ConfPath},
 		},
+		"ccache FILE prefix without path": {
+			opts:    map[string]string{"service": "HTTP/bao.example.com"},
+			env:     "FILE:",
+			wantErr: "credential cache path is empty",
+		},
 		"ccache unsupported type": {
 			opts:    map[string]string{"service": "HTTP/bao.example.com"},
 			env:     "KEYRING:persistent:1003",
@@ -120,5 +125,16 @@ func TestCLI_LoginCfg(t *testing.T) {
 				t.Fatalf("want %+v, got %+v", tc.want, *got)
 			}
 		})
+	}
+}
+
+func TestCLI_GetAuthHeaderVal_MissingCCache(t *testing.T) {
+	krb5Conf := t.TempDir() + "/krb5.conf"
+	if err := os.WriteFile(krb5Conf, []byte("[libdefaults]\n  default_realm = EXAMPLE.COM\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := GetAuthHeaderVal(&LoginCfg{Service: "HTTP/bao.example.com", Krb5ConfPath: krb5Conf, CCachePath: t.TempDir() + "/missing"})
+	if err == nil || !strings.Contains(err.Error(), "not found: run kinit") {
+		t.Fatalf("want missing-cache error, got %v", err)
 	}
 }

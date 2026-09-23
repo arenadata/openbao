@@ -123,7 +123,8 @@ Configuration:
 type LoginCfg struct {
 	Username, Service, Realm, KeytabPath, Krb5ConfPath string
 
-	// CCachePath is the credential cache used when KeytabPath is empty.
+	// CCachePath is the credential cache used when KeytabPath is empty;
+	// empty means KRB5CCNAME, then /tmp/krb5cc_<uid>.
 	CCachePath string
 
 	// FAST is a pre-authentication framework for Kerberos. It includes
@@ -207,6 +208,9 @@ func ccachePath(explicit string) (string, error) {
 		}
 		path = rest
 	}
+	if path == "" {
+		return "", errors.New("credential cache path is empty")
+	}
 	return path, nil
 }
 
@@ -237,13 +241,20 @@ func GetAuthHeaderVal(loginCfg *LoginCfg) (string, error) {
 		}
 		cl = client.NewWithKeytab(loginCfg.Username, loginCfg.Realm, kt, krb5Conf, settings...)
 	} else {
-		ccache, err := credentials.LoadCCache(loginCfg.CCachePath)
+		path, err := ccachePath(loginCfg.CCachePath)
 		if err != nil {
-			return "", fmt.Errorf("couldn't load credential cache %s: %w", loginCfg.CCachePath, err)
+			return "", err
+		}
+		ccache, err := credentials.LoadCCache(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return "", fmt.Errorf("credential cache %s not found: run kinit, or point ccache_path or KRB5CCNAME at a FILE cache", path)
+			}
+			return "", fmt.Errorf("couldn't load credential cache %s: %w", path, err)
 		}
 		cl, err = client.NewFromCCache(ccache, krb5Conf, settings...)
 		if err != nil {
-			return "", fmt.Errorf("couldn't use credential cache %s: %w", loginCfg.CCachePath, err)
+			return "", fmt.Errorf("couldn't use credential cache %s: %w", path, err)
 		}
 	}
 	defer cl.Destroy()

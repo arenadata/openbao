@@ -152,6 +152,8 @@ $ bao write auth/kerberos/roles/hadoop \
 - The usual [token parameters](/api-docs/auth/kerberos#createupdate-role)
   (`token_policies`, `token_ttl`, `token_bound_cidrs`, ...) are available on
   the role.
+- `allowed_proxy_principals` lets the principals bound to this role alone
+  issue delegation tokens for other principals; see [Proxy users](#proxy-users).
 
 At login the authenticated principal is matched against every role, or only
 against the role named by the `role` parameter. Exactly one role must match:
@@ -210,15 +212,15 @@ $ curl \
 
 - `renewer` names who may renew the token, usually the short name of the
   YARN ResourceManager principal. It is compared with the renewing
-  principal's full name and, for callers from the owner's realm only, with
-  its `primary/instance` and its primary alone.
-  Without a renewer the token expires after one `renew_interval`.
+  principal's full name and, for callers from the realm of the principal
+  that requested the token only, with its `primary/instance` and its primary
+  alone. Without a renewer the token expires after one `renew_interval`.
 - `service` is copied into the token's service field so the Hadoop client can
   find it in the job credentials; OpenBao does not interpret it.
 - `max_lifetime` requests a shorter hard lifetime than the configured one.
 - `role` selects the role as at login; without it exactly one role must match
-  the principal. The role is fixed in the token record and is the one a later
-  login uses.
+  the token's owner. The role is fixed in the token record and is the one a
+  later login uses.
 
 The response carries the token in `token`, the Hadoop URL string form of
 `Token` (`Token.decodeFromUrlString()` reads it), together with its owner,
@@ -239,8 +241,9 @@ OpenBao tokens already issued from it; they run out at their TTL.
 
 `delegation/renew` and `delegation/cancel` take the token in `token`. Only the
 renewer may renew, and the new `expiry` is `renew_interval` ahead, never past
-`max_date`. The owner or the renewer may cancel; from then on the token fails
-to log in or renew, which is how a job's tokens are retired when the
+`max_date`. The owner, the renewer or a principal allowed to impersonate the
+owner (see [Proxy users](#proxy-users)) may cancel; from then on the token
+fails to log in or renew, which is how a job's tokens are retired when the
 application finishes.
 
 Tokens are signed with a random key that rotates every
@@ -251,6 +254,75 @@ node deletes expired tokens and keys no token references. Deleting
 
 A delegation token is a bearer credential: transport it only over TLS and
 treat job credential files as secrets.
+
+### Proxy users
+
+A service that runs jobs for its users, such as HiveServer2, Oozie or Livy,
+can issue a token owned by the user it acts for, as a Hadoop proxy user does.
+The service authenticates with its own SPNEGO token and names the user in
+`doas`. The user owns the token and the service is recorded as its real
+user, the `realUser` field of the Hadoop identifier.
+
+A name without a realm, such as a Hadoop short user name, is in the realm set
+by `doas_realm` in `config/delegation` or, without it, in the service's
+realm. Set `doas_realm` when users come from a trusted realm, for example
+Active Directory users of a cluster whose services live in an MIT or FreeIPA
+realm:
+
+```shell-session
+$ bao write auth/kerberos/config/delegation doas_realm=AD.MATRIX.LAN
+```
+
+The role bound to the service, which must be its only role, lists the users
+in `allowed_proxy_principals`, the counterpart of
+`hadoop.proxyuser.<service>.users`:
+
+```shell-session
+$ bao write auth/kerberos/roles/hive \
+    bound_principals="hive/*@MATRIX.LAN" \
+    allowed_proxy_principals="alice@MATRIX.LAN,bob@MATRIX.LAN" \
+    token_policies=hive-keys
+
+$ curl \
+    --header "Authorization: Negotiate YIIFSw...sWw" \
+    --request POST \
+    --data '{"doas": "alice", "renewer": "yarn", "service": "openbao.example.com:8200"}' \
+    https://openbao.example.com:8200/v1/auth/kerberos/delegation/token
+```
+
+- `allowed_proxy_principals` holds patterns matched against the full
+  principal name, like `bound_principals`; an entry needs a realm or a `*`.
+  A login with a token issued for a user is a login as that user: it gets
+  the policies of the user's role and the user's entity, with the policies
+  of the entity and its groups, including those granted through other auth
+  methods. Keep the list to the users the service acts for: `*@MATRIX.LAN`
+  also covers every service principal of the realm.
+- The grant is taken only from the service's role, the one it logs in with,
+  so a service bound to several roles cannot impersonate anyone. The role's
+  `token_bound_cidrs`, if set, must contain the service's address, the
+  counterpart of `hadoop.proxyuser.<service>.hosts`.
+- The user needs a role of their own, chosen by `role` or as the only role
+  bound to them. The token records it, and its `token_bound_cidrs` apply to
+  the service's address as well.
+- A short `renewer` is compared within the service's realm, not the user's.
+
+A login with the token names the service in the `real_user` metadata field,
+which the audit log records. The token also records the service's role. The
+login, each renewal of the token and each renewal of an OpenBao token from it
+check that this role still binds the service and lists the user. Removing the
+user from the list, rebinding the role or deleting it suspends the tokens
+already issued: they stop logging in and renewing and lapse within one
+`renew_interval`, unless the grant comes back first. OpenBao tokens already
+logged in run out at their TTL. Cancel the tokens, or delete
+`config/delegation`, to end them for good.
+
+Besides the owner and the renewer, a principal allowed to impersonate the
+owner, from an address its role admits, may cancel a token, as it can in
+Hadoop by acting as the owner.
+
+A server without proxy user support ignores `doas`, with a warning, and
+issues a token owned by the caller. A client that passes `doas` should check
+`owner` and `real_user` in the response before handing the token on.
 
 ## Authentication
 

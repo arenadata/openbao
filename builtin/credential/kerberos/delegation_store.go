@@ -50,6 +50,20 @@ type delegationTokenEntry struct {
 	Identifier []byte    `json:"identifier"`
 	Expiry     time.Time `json:"expiry"`
 	Role       string    `json:"role"`
+	// ProxyRole is the role that let the real user impersonate the owner.
+	ProxyRole string `json:"proxy_role,omitempty"`
+}
+
+// delegationRequest is what a caller asks a new token for.
+type delegationRequest struct {
+	Owner     string
+	RealUser  string
+	Renewer   string
+	Service   string
+	Role      string
+	ProxyRole string
+	// MaxLifetime is capped by the configured one; zero means that one.
+	MaxLifetime time.Duration
 }
 
 func delegationPassword(key, identifier []byte) []byte {
@@ -159,9 +173,9 @@ func (b *backend) delegationTokenEntry(ctx context.Context, s logical.Storage, s
 	return tok, nil
 }
 
-// issueDelegationToken signs a new token for owner with the current key and
-// records it. Caller holds delegationLock.
-func (b *backend) issueDelegationToken(ctx context.Context, s logical.Storage, cfg *delegationConfig, owner, renewer, service, role string, maxLifetime time.Duration) (*delegationToken, *delegationTokenIdentifier, *delegationTokenEntry, error) {
+// issueDelegationToken signs a new token with the current key and records
+// it. Caller holds delegationLock.
+func (b *backend) issueDelegationToken(ctx context.Context, s logical.Storage, cfg *delegationConfig, r delegationRequest) (*delegationToken, *delegationTokenIdentifier, *delegationTokenEntry, error) {
 	state, err := b.delegationState(ctx, s)
 	if err != nil {
 		return nil, nil, nil, err
@@ -171,6 +185,7 @@ func (b *backend) issueDelegationToken(ctx context.Context, s logical.Storage, c
 		return nil, nil, nil, err
 	}
 
+	maxLifetime := r.MaxLifetime
 	if maxLifetime <= 0 || maxLifetime > cfg.MaxLifetime {
 		maxLifetime = cfg.MaxLifetime
 	}
@@ -186,8 +201,9 @@ func (b *backend) issueDelegationToken(ctx context.Context, s logical.Storage, c
 		seq = 1
 	}
 	id := &delegationTokenIdentifier{
-		Owner:          owner,
-		Renewer:        renewer,
+		Owner:          r.Owner,
+		Renewer:        r.Renewer,
+		RealUser:       r.RealUser,
 		IssueDate:      now.UnixMilli(),
 		MaxDate:        now.Add(maxLifetime).UnixMilli(),
 		SequenceNumber: seq,
@@ -196,7 +212,8 @@ func (b *backend) issueDelegationToken(ctx context.Context, s logical.Storage, c
 	entry := &delegationTokenEntry{
 		Identifier: id.marshal(),
 		Expiry:     delegationExpiry(now, cfg, id),
-		Role:       role,
+		Role:       r.Role,
+		ProxyRole:  r.ProxyRole,
 	}
 	if err := putJSON(ctx, s, delegationTokenPath(seq), entry); err != nil {
 		return nil, nil, nil, err
@@ -210,7 +227,7 @@ func (b *backend) issueDelegationToken(ctx context.Context, s logical.Storage, c
 		Identifier: entry.Identifier,
 		Password:   delegationPassword(key.Key, entry.Identifier),
 		Kind:       cfg.TokenKind,
-		Service:    service,
+		Service:    r.Service,
 	}
 	return tok, id, entry, nil
 }

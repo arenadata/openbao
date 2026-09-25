@@ -6,6 +6,7 @@ package kerberos
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/openbao/openbao/sdk/v2/framework"
@@ -41,6 +42,9 @@ type delegationConfig struct {
 	CleanupInterval time.Duration `json:"cleanup_interval"`
 	// TokenKind is the Hadoop token kind written into every token.
 	TokenKind string `json:"token_kind"`
+	// DoasRealm is the realm of a doas name given without one; empty means
+	// the caller's realm.
+	DoasRealm string `json:"doas_realm,omitempty"`
 }
 
 func (b *backend) pathConfigDelegation() *framework.Path {
@@ -79,6 +83,12 @@ removed from storage. Defaults to 1h.`,
 				Default: defaultDelegationTokenKind,
 				Description: `Hadoop token kind written into issued tokens and required on
 presented ones. Defaults to OPENBAO_DELEGATION_TOKEN.`,
+			},
+			"doas_realm": {
+				Type: framework.TypeString,
+				Description: `Realm of a "doas" name given without one, such as the Hadoop
+short name of a user from a trusted realm. Empty, the default, means the
+caller's realm.`,
 			},
 		},
 		ExistenceCheck: b.pathConfigDelegationExistenceCheck,
@@ -148,6 +158,7 @@ func (b *backend) pathConfigDelegationRead(ctx context.Context, req *logical.Req
 			"key_rotation_interval": int64(cfg.KeyRotationInterval.Seconds()),
 			"cleanup_interval":      int64(cfg.CleanupInterval.Seconds()),
 			"token_kind":            cfg.TokenKind,
+			"doas_realm":            cfg.DoasRealm,
 		},
 	}, nil
 }
@@ -195,9 +206,15 @@ func (b *backend) pathConfigDelegationWrite(ctx context.Context, req *logical.Re
 	if raw, ok := d.GetOk("token_kind"); ok {
 		cfg.TokenKind = raw.(string)
 	}
+	if raw, ok := d.GetOk("doas_realm"); ok {
+		cfg.DoasRealm = raw.(string)
+	}
 
 	if cfg.TokenKind == "" {
 		return logical.ErrorResponse("token_kind must not be empty"), logical.ErrInvalidRequest
+	}
+	if cfg.DoasRealm != "" && (strings.Contains(cfg.DoasRealm, "@") || !validPrincipalText(cfg.DoasRealm)) {
+		return logical.ErrorResponse("doas_realm %q is not a realm name", cfg.DoasRealm), logical.ErrInvalidRequest
 	}
 	if cfg.RenewInterval > cfg.MaxLifetime {
 		return logical.ErrorResponse("renew_interval %s exceeds max_lifetime %s", cfg.RenewInterval, cfg.MaxLifetime), logical.ErrInvalidRequest

@@ -102,6 +102,7 @@ func TestRoles_RejectsBadWrites(t *testing.T) {
 		"missing bound_principals": {"token_policies": "x"},
 		"empty entries only":       {"bound_principals": " , "},
 		"period above max ttl":     {"bound_principals": "*@EXAMPLE.COM", "token_period": "48h"},
+		"proxy grant":              {"bound_principals": "*@EXAMPLE.COM", "allowed_proxy_principals": "alice@EXAMPLE.COM"},
 	}
 	for name, data := range cases {
 		resp, err := doRequest(t, b, storage, logical.UpdateOperation, "roles/bad", data)

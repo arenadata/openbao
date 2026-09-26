@@ -210,15 +210,15 @@ $ curl \
 
 - `renewer` names who may renew the token, usually the short name of the
   YARN ResourceManager principal. It is compared with the renewing
-  principal's full name and, for callers from the owner's realm only, with
-  its `primary/instance` and its primary alone.
-  Without a renewer the token expires after one `renew_interval`.
+  principal's full name and, for callers from the realm of the principal
+  that requested the token only, with its `primary/instance` and its primary
+  alone. Without a renewer the token expires after one `renew_interval`.
 - `service` is copied into the token's service field so the Hadoop client can
   find it in the job credentials; OpenBao does not interpret it.
 - `max_lifetime` requests a shorter hard lifetime than the configured one.
 - `role` selects the role as at login; without it exactly one role must match
-  the principal. The role is fixed in the token record and is the one a later
-  login uses.
+  the token's owner. The role is fixed in the token record and is the one a
+  later login uses.
 
 The response carries the token in `token`, the Hadoop URL string form of
 `Token` (`Token.decodeFromUrlString()` reads it), together with its owner,
@@ -239,8 +239,9 @@ OpenBao tokens already issued from it; they run out at their TTL.
 
 `delegation/renew` and `delegation/cancel` take the token in `token`. Only the
 renewer may renew, and the new `expiry` is `renew_interval` ahead, never past
-`max_date`. The owner or the renewer may cancel; from then on the token fails
-to log in or renew, which is how a job's tokens are retired when the
+`max_date`. The owner, the renewer or a principal allowed to impersonate the
+owner (see [Proxy users](#proxy-users)) may cancel; from then on the token
+fails to log in or renew, which is how a job's tokens are retired when the
 application finishes.
 
 Tokens are signed with a random key that rotates every
@@ -251,6 +252,82 @@ node deletes expired tokens and keys no token references. Deleting
 
 A delegation token is a bearer credential: transport it only over TLS and
 treat job credential files as secrets.
+
+### Proxy users
+
+A service that runs jobs for its users, such as HiveServer2, Oozie or Livy,
+can issue a token owned by the user it acts for, as a Hadoop proxy user does.
+The service authenticates with its own SPNEGO token and names the user in
+`doas`. The user owns the token and the service is recorded as its real
+user, the `realUser` field of the Hadoop identifier.
+
+A name without a realm, such as a Hadoop short user name, is in the realm set
+by `doas_realm` in `config/delegation` or, without it, in the service's
+realm. Set `doas_realm` when users come from a trusted realm, for example
+Active Directory users of a cluster whose services live in an MIT or FreeIPA
+realm:
+
+```shell-session
+$ bao write auth/kerberos/config/delegation doas_realm=AD.MATRIX.LAN
+```
+
+Who may act for whom is kept apart from roles, in proxies under `proxy/`,
+the counterpart of `hadoop.proxyuser.<name>.users` and `.hosts`:
+
+```shell-session
+$ bao write auth/kerberos/proxy/hive \
+    bound_principals="hive/*@MATRIX.LAN" \
+    allowed_principals="alice@AD.MATRIX.LAN,bob@AD.MATRIX.LAN" \
+    bound_cidrs="10.0.12.0/24"
+
+$ curl \
+    --header "Authorization: Negotiate YIIFSw...sWw" \
+    --request POST \
+    --data '{"doas": "alice", "renewer": "yarn", "service": "openbao.example.com:8200"}' \
+    https://openbao.example.com:8200/v1/auth/kerberos/delegation/token
+```
+
+- `bound_principals` matches the service and `allowed_principals` the users
+  it may act for. Both hold patterns matched against the full principal
+  name. An entry needs a realm after its last `@`, `*` for any realm; `*` is
+  the only wildcard and also matches `/` and `@`.
+- `bound_cidrs` holds IP addresses and CIDR blocks the service must connect
+  from. An empty list admits any address, whereas Hadoop refuses
+  impersonation while `.hosts` is unset.
+- A request is granted when one proxy matches the service, the user and the
+  address. The service needs no role, and neither the roles bound to it nor
+  their `token_bound_cidrs` play a part.
+- `hadoop.proxyuser.<name>.groups` has no counterpart. `*@MATRIX.LAN`, like
+  `hadoop.proxyuser.<name>.users=*`, also covers every service principal and
+  administrator of the realm, so list the users instead, or keep them in a
+  realm of their own and allow every principal of that realm.
+- A login with a token issued for a user is a login as that user: it gets
+  the policies of the user's role and the user's entity, with the policies
+  of the entity and its groups, including those granted through other auth
+  methods. Whoever can write `proxy/` can let a principal they control act
+  as any user with a role, so grant that access as carefully as access to
+  `roles/`.
+- The user needs a role of their own, chosen by `role` or as the only role
+  bound to them. The token records it, and its `token_bound_cidrs` apply to
+  the service's address as well.
+- A short `renewer` is compared within the service's realm, not the user's.
+
+A login with the token names the service in the `real_user` metadata field,
+which the audit log records. The login, each renewal of the token and each
+renewal of an OpenBao token from it check that a proxy still lets the
+service act for the user, whatever its `bound_cidrs`. Once no proxy does,
+the tokens already issued are suspended: they stop logging in and renewing
+and lapse within one `renew_interval`, unless a proxy allows them again
+first. OpenBao tokens already logged in run out at their TTL. Cancel the
+tokens, or delete `config/delegation`, to end them for good.
+
+Besides the owner and the renewer, a principal that a proxy lets act for the
+owner, from an address the proxy admits, may cancel a token, as it can in
+Hadoop by acting as the owner.
+
+A server without proxy user support ignores `doas`, with a warning, and
+issues a token owned by the caller. A client that passes `doas` should check
+`owner` and `real_user` in the response before handing the token on.
 
 ## Authentication
 

@@ -581,7 +581,11 @@ sWw
   with the role recorded at issuance; no `Authorization` header is needed
   and `role` is rejected. The OpenBao token's explicit max TTL is capped by
   the delegation token's remaining time to `expiry`, and it renews only
-  while the delegation token is valid. See [Delegation tokens](#delegation-tokens).
+  while the delegation token is valid. For a token issued with `doas`, the
+  `real_user` metadata field names the principal that issued it, and the
+  login and each renewal require that a [proxy](#createupdate-proxy) still
+  lets that principal impersonate the owner. See
+  [Delegation tokens](#delegation-tokens).
 
 ### Sample request
 
@@ -625,6 +629,9 @@ their current value, or their default on the first write.
 - `token_kind` `(string: "OPENBAO_DELEGATION_TOKEN")` – Hadoop token kind
   written into issued tokens and required on presented ones. Must match the
   kind of the `TokenIdentifier` class on the Hadoop side.
+- `doas_realm` `(string: "")` – Realm of a `doas` name given without one,
+  such as the Hadoop short name of a user from a trusted realm. Empty means
+  the caller's realm.
 
 #### Sample payload
 
@@ -665,6 +672,7 @@ $ curl \
 {
   "data": {
     "cleanup_interval": 3600,
+    "doas_realm": "",
     "key_rotation_interval": 86400,
     "max_lifetime": 604800,
     "renew_interval": 86400,
@@ -696,23 +704,41 @@ $ curl \
 | :----- | :-------------------------------- |
 | `POST` | `/auth/kerberos/delegation/token` |
 
-Issues a token owned by the SPNEGO-authenticated principal. The principal is
-matched against roles exactly as at login and the selected role is recorded
-in the token; a login with the token uses that role. The role's
-`token_bound_cidrs` are enforced on the caller.
+Issues a token owned by the SPNEGO-authenticated principal or, with `doas`,
+by the principal it names. The owner is matched against roles exactly as at
+login and the selected role is recorded in the token; a login with the token
+uses that role. The role's `token_bound_cidrs` are enforced on the caller.
+
+With `doas` the caller acts as a Hadoop proxy user: the token's owner is the
+named principal and its real user (`realUser` in the Hadoop identifier) is
+the caller. A [proxy](#createupdate-proxy) must bind the caller, allow the
+owner and admit the caller's address; otherwise the request is denied before
+the owner's roles are consulted. The caller needs no role. Logins and
+renewals check that a proxy still lets the caller impersonate the owner.
+
+A server without `doas` support ignores the parameter with a warning and
+issues a token owned by the caller, so a client should check `owner` and
+`real_user` in the response.
 
 #### Parameters
 
 - `renewer` `(string: "")` – Name allowed to renew the token, compared with
-  the renewing principal's full name and, for callers from the owner's realm
-  only, its `primary/instance` and its primary alone. Empty makes the token
+  the renewing principal's full name and, when that principal is in the
+  realm of the one issuing the token, with its `primary/instance` and its
+  primary alone. At most 1024 bytes, without spaces. Empty makes the token
   non-renewable.
-- `service` `(string: "")` – Hadoop token service written into the token.
-  Not interpreted by OpenBao.
+- `service` `(string: "")` – Hadoop token service written into the token,
+  at most 1024 bytes. Not interpreted by OpenBao.
 - `max_lifetime` `(duration: "")` – Requested hard lifetime, capped by the
   configured `max_lifetime`.
 - `role` `(string: "")` – Role to issue the token for. Without it every role
-  is matched and exactly one must match the principal.
+  is matched and exactly one must match the owner.
+- `doas` `(string: "")` – Principal to issue the token for instead of the
+  caller. A name without a realm, such as the short name of a Hadoop proxy
+  user, is in the `doas_realm` of the delegation token configuration or,
+  without one, in the caller's realm; otherwise the realm follows the last
+  `@`. Spaces, non-printing characters, `*` and `,` are rejected. Naming the
+  caller itself issues an ordinary token.
 
 #### Sample request
 
@@ -735,6 +761,7 @@ $ curl \
     "master_key_id": 1,
     "max_date": 1756944000000,
     "owner": "hadoop/nn1.matrix.lan@MATRIX.LAN",
+    "real_user": "",
     "renewer": "yarn",
     "role": "hadoop",
     "sequence_number": 42,
@@ -746,7 +773,8 @@ $ curl \
 
 `token` is the Hadoop URL string form of `Token`, readable with
 `Token.decodeFromUrlString()`; it contains the identifier, the password, the
-kind and the service.
+kind and the service. `real_user` is empty unless the token was issued with
+`doas`.
 
 ### Renew delegation token
 
@@ -755,7 +783,9 @@ kind and the service.
 | `POST` | `/auth/kerberos/delegation/renew` |
 
 Extends the token's `expiry` by `renew_interval`, never past `max_date`. The
-SPNEGO-authenticated caller must be the token's renewer.
+SPNEGO-authenticated caller must be the token's renewer. A token issued with
+`doas` renews only while a proxy still lets its real user impersonate its
+owner.
 
 #### Parameters
 
@@ -791,8 +821,10 @@ $ curl \
 | `POST` | `/auth/kerberos/delegation/cancel` |
 
 Removes the token; it can no longer log in or be renewed. The
-SPNEGO-authenticated caller must be the token's owner or renewer. OpenBao
-tokens already issued from it are not revoked but cannot be renewed.
+SPNEGO-authenticated caller must be the token's owner, its renewer, or a
+principal that a proxy lets impersonate the owner from the caller's
+address. OpenBao tokens already issued from it are not revoked but cannot
+be renewed.
 
 #### Parameters
 
@@ -807,4 +839,138 @@ $ curl \
     --request POST \
     --data '{"token": "KAARYWxpY2..."}' \
     http://127.0.0.1:8200/v1/auth/kerberos/delegation/cancel
+```
+
+### List proxies
+
+| Method | Path                   |
+| :----- | :--------------------- |
+| `LIST` | `/auth/kerberos/proxy` |
+
+#### Parameters
+
+- `after` `(string: "")` - Optional entry to begin listing after for
+  pagination; not required to exist.
+
+- `limit` `(int: 0)` - Optional number of entries to return; defaults
+  to all entries.
+
+#### Sample request
+
+```shell-session
+$ curl \
+    --header "X-Vault-Token: ..." \
+    --request LIST \
+    http://127.0.0.1:8200/v1/auth/kerberos/proxy
+```
+
+#### Sample response
+
+```json
+{
+  "data": {
+    "keys": ["hive", "oozie"]
+  }
+}
+```
+
+### Read proxy
+
+| Method | Path                         |
+| :----- | :--------------------------- |
+| `GET`  | `/auth/kerberos/proxy/:name` |
+
+#### Parameters
+
+- `name` `(string: <required>)` – The name of the proxy.
+
+#### Sample request
+
+```shell-session
+$ curl \
+    --header "X-Vault-Token: ..." \
+    http://127.0.0.1:8200/v1/auth/kerberos/proxy/hive
+```
+
+#### Sample response
+
+```json
+{
+  "data": {
+    "allowed_principals": ["*@AD.MATRIX.LAN"],
+    "bound_cidrs": ["10.0.12.0/24"],
+    "bound_principals": ["hive/*@MATRIX.LAN"]
+  }
+}
+```
+
+### Create/Update proxy
+
+| Method | Path                         |
+| :----- | :--------------------------- |
+| `POST` | `/auth/kerberos/proxy/:name` |
+
+A proxy lets principals issue delegation tokens owned by other principals
+with `doas`, the counterpart of `hadoop.proxyuser.<name>.users` and
+`.hosts`; `.groups` has none. A request is granted when one proxy matches
+the caller in `bound_principals`, the owner in `allowed_principals` and the
+caller's address in `bound_cidrs`. Proxies are independent of roles.
+Parameters not sent keep their current value; unknown parameters are
+rejected.
+
+#### Parameters
+
+- `name` `(string: <required>)` – The name of the proxy.
+- `bound_principals` `(array: <required>)` – Patterns matched against the
+  full principal name of the caller. Each entry needs a realm after its last
+  `@`, `*` for any realm; `*` is the only wildcard and also matches `/` and
+  `@`. Empty entries are dropped.
+- `allowed_principals` `(array: <required>)` – Patterns matched against the
+  full principal name of the token owner, written like `bound_principals`.
+  Empty entries are dropped.
+- `bound_cidrs` `(array: [])` – IP addresses or CIDR blocks the caller must
+  connect from. Host names, ports and IPv4-mapped IPv6 addresses are not
+  accepted. Empty allows any address, whereas Hadoop refuses impersonation
+  while `.hosts` is unset.
+
+#### Sample payload
+
+```json
+{
+  "bound_principals": "hive/*@MATRIX.LAN",
+  "allowed_principals": "*@AD.MATRIX.LAN",
+  "bound_cidrs": "10.0.12.0/24"
+}
+```
+
+#### Sample request
+
+```shell-session
+$ curl \
+    --header "X-Vault-Token: ..." \
+    --request POST \
+    --data @payload.json \
+    http://127.0.0.1:8200/v1/auth/kerberos/proxy/hive
+```
+
+### Delete proxy
+
+| Method   | Path                         |
+| :------- | :--------------------------- |
+| `DELETE` | `/auth/kerberos/proxy/:name` |
+
+Tokens issued through the proxy stop logging in and renewing unless another
+proxy allows them, whatever its `bound_cidrs`.
+
+#### Parameters
+
+- `name` `(string: <required>)` – The name of the proxy.
+
+#### Sample request
+
+```shell-session
+$ curl \
+    --header "X-Vault-Token: ..." \
+    --request DELETE \
+    http://127.0.0.1:8200/v1/auth/kerberos/proxy/hive
 ```

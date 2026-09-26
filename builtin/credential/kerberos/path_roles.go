@@ -190,6 +190,9 @@ func (b *backend) pathRoleRead(ctx context.Context, req *logical.Request, d *fra
 }
 
 func (b *backend) pathRoleWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	if _, ok := d.Raw["allowed_proxy_principals"]; ok {
+		return logical.ErrorResponse(`allowed_proxy_principals is not a role parameter; grant impersonation with "proxy/<name>"`), logical.ErrInvalidRequest
+	}
 	name := d.Get("name").(string)
 
 	txRollback, err := logical.StartTxStorage(ctx, req)

@@ -474,7 +474,8 @@ func (b *backend) loginWithRoles(ctx context.Context, req *logical.Request, iden
 
 // loginWithDelegationToken logs in as the owner of a delegation token with
 // the role fixed at issuance. The token's remaining renewable lifetime caps
-// the issued OpenBao token.
+// the issued OpenBao token. A token with a real user also needs a proxy to
+// still let the real user impersonate the owner.
 func (b *backend) loginWithDelegationToken(ctx context.Context, req *logical.Request, urlString string) (*logical.Response, error) {
 	cfg, resp, err := b.delegationEnabled(ctx, req)
 	if err != nil || resp != nil {
@@ -497,6 +498,13 @@ func (b *backend) loginWithDelegationToken(ctx context.Context, req *logical.Req
 	if err := checkBoundCIDRs(b, req, role.TokenBoundCIDRs); err != nil {
 		return nil, err
 	}
+	denial, err := b.revokedImpersonation(ctx, req.Storage, id, entry)
+	if err != nil {
+		return nil, err
+	}
+	if denial != "" {
+		return logical.ErrorResponse(denial), logical.ErrPermissionDenied
+	}
 
 	owner, domain := types.ParseSPNString(id.Owner)
 	user := owner.PrincipalNameString()
@@ -508,6 +516,9 @@ func (b *backend) loginWithDelegationToken(ctx context.Context, req *logical.Req
 	auth.InternalData["principal"] = id.Owner
 	auth.InternalData["delegation_token"] = seq
 	auth.InternalData["delegation_token_identifier"] = base64.StdEncoding.EncodeToString(entry.Identifier)
+	if id.RealUser != "" {
+		auth.Metadata["real_user"] = id.RealUser
+	}
 
 	if err := role.PopulateTokenAuth(auth, req); err != nil {
 		return nil, fmt.Errorf("failed to populate auth information: %w", err)
@@ -524,7 +535,7 @@ func (b *backend) loginWithDelegationToken(ctx context.Context, req *logical.Req
 
 // pathLoginRenew renews tokens issued from a role; LDAP-mode tokens are not
 // renewable and never reach it. A token logged in with a delegation token
-// also needs that delegation token to still be valid.
+// also needs that delegation token to still be usable.
 func (b *backend) pathLoginRenew(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	roleName, _ := req.Auth.InternalData["role"].(string)
 	principal, _ := req.Auth.InternalData["principal"].(string)
@@ -548,7 +559,7 @@ func (b *backend) pathLoginRenew(ctx context.Context, req *logical.Request, d *f
 
 	if seq, _ := req.Auth.InternalData["delegation_token"].(string); seq != "" {
 		identifier, _ := req.Auth.InternalData["delegation_token_identifier"].(string)
-		if err := b.checkDelegationTokenAlive(ctx, req.Storage, seq, identifier); err != nil {
+		if err := b.checkDelegationTokenUsable(ctx, req.Storage, seq, identifier); err != nil {
 			return nil, err
 		}
 	}
@@ -560,11 +571,11 @@ func (b *backend) pathLoginRenew(ctx context.Context, req *logical.Request, d *f
 	return resp, nil
 }
 
-// checkDelegationTokenAlive fails when the delegation token behind a login
-// was cancelled or has expired since. The record is matched by identifier,
-// not only by sequence number, which is reused after the configuration is
-// deleted and recreated.
-func (b *backend) checkDelegationTokenAlive(ctx context.Context, s logical.Storage, seq, identifierB64 string) error {
+// checkDelegationTokenUsable fails when the delegation token behind a login
+// was cancelled, has expired or lost the grant of its real user since. The
+// record is matched by identifier, not only by sequence number, which is
+// reused after the configuration is deleted and recreated.
+func (b *backend) checkDelegationTokenUsable(ctx context.Context, s logical.Storage, seq, identifierB64 string) error {
 	n, err := strconv.ParseInt(seq, 10, 32)
 	if err != nil {
 		return fmt.Errorf("invalid delegation token reference %q", seq)
@@ -578,10 +589,21 @@ func (b *backend) checkDelegationTokenAlive(ctx context.Context, s logical.Stora
 		return fmt.Errorf("failed to read delegation token %s: %w", seq, err)
 	}
 	if entry == nil || !hmac.Equal(entry.Identifier, identifier) {
-		return fmt.Errorf("delegation token %s has been cancelled", seq)
+		return fmt.Errorf("delegation token %s has been cancelled: %w", seq, logical.ErrPermissionDenied)
 	}
 	if !b.now().Before(entry.Expiry) {
-		return fmt.Errorf("delegation token %s has expired", seq)
+		return fmt.Errorf("delegation token %s has expired: %w", seq, logical.ErrPermissionDenied)
+	}
+	id, err := unmarshalIdentifier(entry.Identifier)
+	if err != nil {
+		return fmt.Errorf("invalid delegation token %s: %w", seq, err)
+	}
+	denial, err := b.revokedImpersonation(ctx, s, id, entry)
+	if err != nil {
+		return err
+	}
+	if denial != "" {
+		return fmt.Errorf("%s: %w", denial, logical.ErrPermissionDenied)
 	}
 	return nil
 }

@@ -63,9 +63,8 @@ is matched and exactly one must match the owner's principal.`,
 			Type: framework.TypeString,
 			Description: `Principal to own the token instead of the caller, who is then
 recorded as its real user. A name without a realm is in the doas_realm of
-config/delegation or, without one, in the caller's realm. The caller must be
-bound to exactly one role, and that role must list the principal in
-allowed_proxy_principals. Optional.`,
+config/delegation or, without one, in the caller's realm. A proxy must allow
+the caller to impersonate the principal. Optional.`,
 		},
 	})
 }
@@ -165,7 +164,7 @@ func (b *backend) pathDelegationTokenUpdate(ctx context.Context, req *logical.Re
 	}
 
 	caller := fullPrincipal(identity)
-	owner, realUser, proxyRole := caller, "", ""
+	owner, realUser := caller, ""
 	if doas := d.Get("doas").(string); doas != "" {
 		realm := cfg.DoasRealm
 		if realm == "" {
@@ -178,11 +177,14 @@ func (b *backend) pathDelegationTokenUpdate(ctx context.Context, req *logical.Re
 	if owner != caller {
 		// Checked before the owner's roles, so a caller cannot probe role
 		// bindings.
-		grant, resp, err := b.proxyGrant(ctx, req, caller, owner)
-		if err != nil || resp != nil {
-			return resp, err
+		denial, err := b.impersonationDenial(ctx, req, caller, owner)
+		if err != nil {
+			return nil, err
 		}
-		realUser, proxyRole = caller, grant.Name
+		if denial != "" {
+			return logical.ErrorResponse(denial), logical.ErrPermissionDenied
+		}
+		realUser = caller
 	}
 
 	role, resp, err := b.selectRole(ctx, req.Storage, owner, roleName)
@@ -219,7 +221,6 @@ func (b *backend) pathDelegationTokenUpdate(ctx context.Context, req *logical.Re
 		Renewer:     renewer,
 		Service:     service,
 		Role:        role.Name,
-		ProxyRole:   proxyRole,
 		MaxLifetime: maxLifetime,
 	})
 	if err != nil {
@@ -268,7 +269,7 @@ func (b *backend) pathDelegationRenewUpdate(ctx context.Context, req *logical.Re
 	if !renewerMatches(identity, id) {
 		return logical.ErrorResponse("principal %q is not the renewer %q of delegation token %d", fullPrincipal(identity), id.Renewer, id.SequenceNumber), logical.ErrPermissionDenied
 	}
-	denial, err := b.proxyGrantDenial(ctx, req.Storage, id, entry)
+	denial, err := b.revokedImpersonation(ctx, req.Storage, id)
 	if err != nil {
 		return nil, err
 	}
@@ -308,11 +309,11 @@ func (b *backend) pathDelegationCancelUpdate(ctx context.Context, req *logical.R
 	if caller != id.Owner && (id.Renewer == "" || !renewerMatches(identity, id)) {
 		// A principal allowed to impersonate the owner may cancel too, as in
 		// Hadoop, where it cancels as the owner.
-		_, resp, err := b.proxyGrant(ctx, req, caller, id.Owner)
-		if err != nil && !errors.Is(err, logical.ErrPermissionDenied) {
+		denial, err := b.impersonationDenial(ctx, req, caller, id.Owner)
+		if err != nil {
 			return nil, err
 		}
-		if err != nil || resp != nil {
+		if denial != "" {
 			return logical.ErrorResponse("principal %q is neither the owner nor the renewer of delegation token %d and may not impersonate its owner", caller, id.SequenceNumber), logical.ErrPermissionDenied
 		}
 	}
@@ -350,42 +351,41 @@ func validPrincipalText(s string) bool {
 	})
 }
 
-// proxyGrant returns the role that lets caller impersonate owner: the only
-// role bound to caller, listing owner in allowed_proxy_principals and
-// admitting the caller's address. Otherwise the response and error to
-// return are set.
-func (b *backend) proxyGrant(ctx context.Context, req *logical.Request, caller, owner string) (*kerberosRole, *logical.Response, error) {
-	roles, err := b.matchingRoles(ctx, req.Storage, caller, "")
+// impersonationDenial explains why realUser may not request tokens owned by
+// owner from the address of req. It is empty when a proxy allows it.
+func (b *backend) impersonationDenial(ctx context.Context, req *logical.Request, realUser, owner string) (string, error) {
+	proxies, err := b.matchingProxies(ctx, req.Storage, realUser, owner)
 	if err != nil {
-		return nil, nil, fmt.Errorf("unable to match roles: %w", err)
+		return "", fmt.Errorf("unable to match proxies: %w", err)
 	}
-	switch {
-	case len(roles) == 0:
-		return nil, logical.ErrorResponse("no role is bound to principal %q", caller), logical.ErrPermissionDenied
-	case len(roles) > 1:
-		return nil, logical.ErrorResponse("principal %q is bound to roles %s; impersonation requires exactly one", caller, roleNames(roles)), logical.ErrPermissionDenied
-	case !roles[0].allowsProxy(owner):
-		return nil, logical.ErrorResponse("role %q of principal %q does not allow impersonating %q", roles[0].Name, caller, owner), logical.ErrPermissionDenied
+	if len(proxies) == 0 {
+		return fmt.Sprintf("principal %q may not impersonate %q", realUser, owner), nil
 	}
-	if err := checkBoundCIDRs(b, req, roles[0].TokenBoundCIDRs); err != nil {
-		return nil, nil, err
+	for _, proxy := range proxies {
+		if checkBoundCIDRs(b, req, proxy.BoundCIDRs) == nil {
+			return "", nil
+		}
 	}
-	return roles[0], nil, nil
+	addr := ""
+	if req.Connection != nil {
+		addr = req.Connection.RemoteAddr
+	}
+	return fmt.Sprintf("principal %q may not impersonate %q from address %q", realUser, owner, addr), nil
 }
 
-// proxyGrantDenial explains why a token with a real user may no longer be
-// used: the role recorded at issuance as granting the impersonation is gone,
-// no longer binds the real user or no longer lists the owner. It is empty
-// for a token without a real user and while the grant holds.
-func (b *backend) proxyGrantDenial(ctx context.Context, s logical.Storage, id *delegationTokenIdentifier, entry *delegationTokenEntry) (string, error) {
+// revokedImpersonation explains why a token with a real user may no longer
+// be used: no proxy lets the real user impersonate the owner any more. It is
+// empty for a token without a real user and while a proxy allows it.
+// Addresses are not checked, as the token is not used from the real user's.
+func (b *backend) revokedImpersonation(ctx context.Context, s logical.Storage, id *delegationTokenIdentifier) (string, error) {
 	if id.RealUser == "" {
 		return "", nil
 	}
-	role, err := b.role(ctx, s, entry.ProxyRole)
+	proxies, err := b.matchingProxies(ctx, s, id.RealUser, id.Owner)
 	if err != nil {
-		return "", fmt.Errorf("unable to read role %q: %w", entry.ProxyRole, err)
+		return "", fmt.Errorf("unable to match proxies: %w", err)
 	}
-	if role == nil || !role.matches(id.RealUser) || !role.allowsProxy(id.Owner) {
+	if len(proxies) == 0 {
 		return fmt.Sprintf("real user %q of delegation token %d may no longer impersonate %q", id.RealUser, id.SequenceNumber, id.Owner), nil
 	}
 	return "", nil
@@ -431,7 +431,6 @@ TokenRenewer, and a holder logs in with it through "login" using the
 "delegation_token" parameter. Every endpoint here requires a SPNEGO token;
 a delegation token cannot be used to obtain another one. With "doas" a
 service issues a token owned by another principal, as a Hadoop proxy user;
-"allowed_proxy_principals" of the service's role decides whom it may
-impersonate.
+"proxy/" decides whom it may impersonate.
 `
 )

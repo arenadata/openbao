@@ -448,7 +448,6 @@ $ curl \
 ```json
 {
   "data": {
-    "allowed_proxy_principals": [],
     "bound_principals": ["hadoop/*@MATRIX.LAN", "nn/*@MATRIX.LAN"],
     "token_bound_cidrs": [],
     "token_explicit_max_ttl": 0,
@@ -477,11 +476,6 @@ $ curl \
   full principal name `primary/instance@REALM`. `*` matches any characters;
   the rest is compared literally and case-sensitively. Any match is sufficient.
   Empty entries are dropped.
-- `allowed_proxy_principals` `(array: [])` – Patterns of the principals that
-  the principals bound to this role, and to no other, may issue delegation
-  tokens for with `doas`, matched like `bound_principals`. Each entry needs a
-  realm or a `*`. Empty forbids impersonation. See
-  [Issue delegation token](#issue-delegation-token).
 
 @include 'tokenfields.mdx'
 
@@ -589,8 +583,8 @@ sWw
   the delegation token's remaining time to `expiry`, and it renews only
   while the delegation token is valid. For a token issued with `doas`, the
   `real_user` metadata field names the principal that issued it, and the
-  login and each renewal require that the role recorded as granting the
-  impersonation still binds that principal and lists the owner. See
+  login and each renewal require that a [proxy](#createupdate-proxy) still
+  lets that principal impersonate the owner. See
   [Delegation tokens](#delegation-tokens).
 
 ### Sample request
@@ -717,11 +711,10 @@ uses that role. The role's `token_bound_cidrs` are enforced on the caller.
 
 With `doas` the caller acts as a Hadoop proxy user: the token's owner is the
 named principal and its real user (`realUser` in the Hadoop identifier) is
-the caller. The caller must be bound to exactly one role, that role must
-list the owner in `allowed_proxy_principals`, and its `token_bound_cidrs`
-must admit the caller's address; otherwise the request is denied before the
-owner's roles are consulted. The token records that role, and logins and
-renewals check that it still binds the caller and lists the owner.
+the caller. A [proxy](#createupdate-proxy) must bind the caller, allow the
+owner and admit the caller's address; otherwise the request is denied before
+the owner's roles are consulted. The caller needs no role. Logins and
+renewals check that a proxy still lets the caller impersonate the owner.
 
 A server without `doas` support ignores the parameter with a warning and
 issues a token owned by the caller, so a client should check `owner` and
@@ -790,8 +783,8 @@ kind and the service. `real_user` is empty unless the token was issued with
 
 Extends the token's `expiry` by `renew_interval`, never past `max_date`. The
 SPNEGO-authenticated caller must be the token's renewer. A token issued with
-`doas` renews only while the role recorded as granting the impersonation
-still binds its real user and lists its owner.
+`doas` renews only while a proxy still lets its real user impersonate its
+owner.
 
 #### Parameters
 
@@ -828,8 +821,7 @@ $ curl \
 
 Removes the token; it can no longer log in or be renewed. The
 SPNEGO-authenticated caller must be the token's owner, its renewer, or a
-principal that may issue tokens for the owner with `doas` from the caller's
-address. OpenBao tokens already issued from it are not revoked but cannot be
+principal that a proxy lets impersonate the owner from the caller's address. OpenBao tokens already issued from it are not revoked but cannot be
 renewed.
 
 #### Parameters
@@ -845,4 +837,135 @@ $ curl \
     --request POST \
     --data '{"token": "KAARYWxpY2..."}' \
     http://127.0.0.1:8200/v1/auth/kerberos/delegation/cancel
+```
+
+### List proxies
+
+| Method | Path                   |
+| :----- | :--------------------- |
+| `LIST` | `/auth/kerberos/proxy` |
+
+#### Parameters
+
+- `after` `(string: "")` - Optional entry to begin listing after for
+  pagination; not required to exist.
+
+- `limit` `(int: 0)` - Optional number of entries to return; defaults
+  to all entries.
+
+#### Sample request
+
+```shell-session
+$ curl \
+    --header "X-Vault-Token: ..." \
+    --request LIST \
+    http://127.0.0.1:8200/v1/auth/kerberos/proxy
+```
+
+#### Sample response
+
+```json
+{
+  "data": {
+    "keys": ["hive", "oozie"]
+  }
+}
+```
+
+### Read proxy
+
+| Method | Path                         |
+| :----- | :--------------------------- |
+| `GET`  | `/auth/kerberos/proxy/:name` |
+
+#### Parameters
+
+- `name` `(string: <required>)` – The name of the proxy.
+
+#### Sample request
+
+```shell-session
+$ curl \
+    --header "X-Vault-Token: ..." \
+    http://127.0.0.1:8200/v1/auth/kerberos/proxy/hive
+```
+
+#### Sample response
+
+```json
+{
+  "data": {
+    "allowed_principals": ["*@AD.MATRIX.LAN"],
+    "bound_cidrs": ["10.0.12.0/24"],
+    "bound_principals": ["hive/*@MATRIX.LAN"]
+  }
+}
+```
+
+### Create/Update proxy
+
+| Method | Path                         |
+| :----- | :--------------------------- |
+| `POST` | `/auth/kerberos/proxy/:name` |
+
+A proxy lets principals issue delegation tokens owned by other principals
+with `doas`, the counterpart of `hadoop.proxyuser.<name>.*`. A request is
+granted when one proxy matches the caller in `bound_principals`, the owner
+in `allowed_principals` and the caller's address in `bound_cidrs`. Proxies
+are independent of roles. Parameters not sent keep their current value.
+
+#### Parameters
+
+- `name` `(string: <required>)` – The name of the proxy.
+- `bound_principals` `(array: <required>)` – Patterns matched against the
+  full principal name of the caller, like the `bound_principals` of a role.
+  Each entry needs a realm or a `*`. Empty entries are dropped.
+- `allowed_principals` `(array: <required>)` – Patterns matched against the
+  full principal name of the token owner, the counterpart of
+  `hadoop.proxyuser.<name>.users`. Each entry needs a realm or a `*`. Empty
+  entries are dropped.
+- `bound_cidrs` `(array: [])` – CIDR blocks or IP addresses the caller must
+  connect from, the counterpart of `hadoop.proxyuser.<name>.hosts`. Host
+  names are not accepted. Empty allows any address.
+
+#### Sample payload
+
+```json
+{
+  "bound_principals": "hive/*@MATRIX.LAN",
+  "allowed_principals": "*@AD.MATRIX.LAN",
+  "bound_cidrs": "10.0.12.0/24"
+}
+```
+
+#### Sample request
+
+```shell-session
+$ curl \
+    --header "X-Vault-Token: ..." \
+    --request POST \
+    --data @payload.json \
+    http://127.0.0.1:8200/v1/auth/kerberos/proxy/hive
+```
+
+### Delete proxy
+
+| Method   | Path                         |
+| :------- | :--------------------------- |
+| `DELETE` | `/auth/kerberos/proxy/:name` |
+
+Tokens issued through the proxy stop logging in and renewing unless another
+proxy allows them.
+
+#### Parameters
+
+- `name` `(string: <required>)` – The name of the proxy.
+
+#### Sample request
+
+```shell-session
+$ curl \
+    --header "X-Vault-Token: ..." \
+    --request DELETE \
+    http://127.0.0.1:8200/v1/auth/kerberos/proxy/hive
 ```

@@ -577,14 +577,14 @@ func TestDelegation_CallerMatches(t *testing.T) {
 	}
 }
 
-// writeProxyRole binds hive/* to a role allowed to impersonate alice and
-// carol; carol is bound to no role of her own.
-func (h *delegationHarness) writeProxyRole() {
+// writeProxy lets hive/* impersonate alice and carol from any address;
+// carol is bound to no role of her own, hive to none at all.
+func (h *delegationHarness) writeProxy() {
 	h.t.Helper()
-	writeRole(h.t, h.b, h.storage, "hive", map[string]interface{}{
-		"bound_principals":         "hive/*@" + testRealm,
-		"allowed_proxy_principals": "alice@" + testRealm + ",carol@" + testRealm,
-		"token_policies":           "hive-keys",
+	writeProxy(h.t, h.b, h.storage, "hive", map[string]interface{}{
+		"bound_principals":   "hive/*@" + testRealm,
+		"allowed_principals": "alice@" + testRealm + ",carol@" + testRealm,
+		"bound_cidrs":        "",
 	})
 }
 
@@ -612,14 +612,14 @@ func (h *delegationHarness) renewAuth(auth *logical.Auth) (*logical.Response, er
 
 func TestDelegation_DoAs(t *testing.T) {
 	h := newDelegationHarness(t)
-	h.writeProxyRole()
+	h.writeProxy()
 	ctx := context.Background()
 	hive := "hive/hs2.example.com@" + testRealm
 	alice := "alice@" + testRealm
 
 	// A name without a realm is in the caller's realm. The impersonated
 	// principal owns the token, with the role bound to it; the caller is the
-	// real user and its role is recorded as the grant.
+	// real user and needs no role.
 	resp := h.issue("hive/hs2.example.com", map[string]interface{}{"doas": "alice", "renewer": "yarn"})
 	if resp.Data["owner"] != alice || resp.Data["real_user"] != hive || resp.Data["role"] != "users" {
 		t.Fatalf("issue: %#v", resp.Data)
@@ -628,7 +628,7 @@ func TestDelegation_DoAs(t *testing.T) {
 	if id := h.identifier(urlString); id.Owner != alice || id.RealUser != hive || id.Renewer != "yarn" {
 		t.Fatalf("identifier %+v", id)
 	}
-	if entry, err := h.b.delegationTokenEntry(ctx, h.storage, 1); err != nil || entry == nil || entry.Role != "users" || entry.ProxyRole != "hive" {
+	if entry, err := h.b.delegationTokenEntry(ctx, h.storage, 1); err != nil || entry == nil || entry.Role != "users" {
 		t.Fatalf("token record: err %v entry %+v", err, entry)
 	}
 
@@ -645,14 +645,9 @@ func TestDelegation_DoAs(t *testing.T) {
 		t.Fatalf("token renew: err %v resp %#v", err, resp)
 	}
 
-	// Once the recorded role stops listing the owner, the token can neither
-	// log in nor be renewed, and neither can OpenBao tokens from it, even
-	// while another role would grant the impersonation.
-	writeRole(t, h.b, h.storage, "hive", map[string]interface{}{"allowed_proxy_principals": "carol@" + testRealm})
-	writeRole(t, h.b, h.storage, "hive-other", map[string]interface{}{
-		"bound_principals":         "hive/*@" + testRealm,
-		"allowed_proxy_principals": alice,
-	})
+	// Once no proxy lets the real user impersonate the owner, the token can
+	// neither log in nor be renewed, and neither can OpenBao tokens from it.
+	writeProxy(t, h.b, h.storage, "hive", map[string]interface{}{"allowed_principals": "carol@" + testRealm})
 	revoked := `real user "` + hive + `" of delegation token 1 may no longer impersonate "` + alice + `"`
 	resp, err = h.login(urlString, nil)
 	assertDenied(t, "login after revocation", resp, err, logical.ErrPermissionDenied, revoked)
@@ -661,36 +656,49 @@ func TestDelegation_DoAs(t *testing.T) {
 	}
 	resp, err = h.spnego("yarn/rm.example.com", delegationRenewPathName, map[string]interface{}{"token": urlString})
 	assertDenied(t, "renew after revocation", resp, err, logical.ErrPermissionDenied, revoked)
-	mustRequest(t, h.b, h.storage, logical.DeleteOperation, "roles/hive-other", nil)
 	resp, err = h.spnego("hive/hs2.example.com", delegationTokenPathName, map[string]interface{}{"doas": "alice"})
-	assertDenied(t, "issue after revocation", resp, err, logical.ErrPermissionDenied, "does not allow impersonating")
+	assertDenied(t, "issue after revocation", resp, err, logical.ErrPermissionDenied, `principal "`+hive+`" may not impersonate "`+alice+`"`)
 
-	h.writeProxyRole()
+	// Any proxy allowing it again restores them, whatever its addresses.
+	writeProxy(t, h.b, h.storage, "hive-alice", map[string]interface{}{
+		"bound_principals":   hive,
+		"allowed_principals": alice,
+		"bound_cidrs":        "192.0.2.0/24",
+	})
 	if resp, err := h.login(urlString, nil); err != nil || resp == nil || resp.Auth == nil {
 		t.Fatalf("login after restoring: err %v resp %#v", err, resp)
+	}
+	if resp, err := h.renewAuth(auth); err != nil || resp == nil || resp.IsError() {
+		t.Fatalf("token renew after restoring: err %v resp %#v", err, resp)
 	}
 	if resp, err := h.spnego("yarn/rm.example.com", delegationRenewPathName, map[string]interface{}{"token": urlString}); err != nil || resp == nil || resp.IsError() {
 		t.Fatalf("renew after restoring: err %v resp %#v", err, resp)
 	}
+	mustRequest(t, h.b, h.storage, logical.DeleteOperation, "proxy/hive-alice", nil)
+	h.writeProxy()
 	resp, err = h.spnego("hive/hs2.example.com", delegationRenewPathName, map[string]interface{}{"token": urlString})
 	assertDenied(t, "renew by real user", resp, err, logical.ErrPermissionDenied, "is not the renewer")
 
 	// Besides the owner and the renewer, a principal that may impersonate
 	// the owner now can cancel, such as another instance of the service, but
-	// not from outside its role's CIDRs.
+	// not from outside the proxy's CIDRs.
 	resp, err = h.spnego("bob", delegationCancelPathName, map[string]interface{}{"token": urlString})
 	assertDenied(t, "cancel by stranger", resp, err, logical.ErrPermissionDenied, "may not impersonate its owner")
-	writeRole(t, h.b, h.storage, "hive", map[string]interface{}{"token_bound_cidrs": "192.0.2.0/24"})
+	writeProxy(t, h.b, h.storage, "hive", map[string]interface{}{"bound_cidrs": "192.0.2.0/24"})
 	resp, err = h.spnego("hive/hs2.example.com", delegationCancelPathName, map[string]interface{}{"token": urlString})
-	assertDenied(t, "cancel outside the grant's cidrs", resp, err, logical.ErrPermissionDenied, "may not impersonate its owner")
-	writeRole(t, h.b, h.storage, "hive", map[string]interface{}{"token_bound_cidrs": ""})
+	assertDenied(t, "cancel outside the proxy's cidrs", resp, err, logical.ErrPermissionDenied, "may not impersonate its owner")
+	h.writeProxy()
 	if resp, err := h.spnego("hive/hs2b.example.com", delegationCancelPathName, map[string]interface{}{"token": urlString}); err != nil || resp != nil {
 		t.Fatalf("cancel by another instance: err %v resp %#v", err, resp)
 	}
 	resp, err = h.login(urlString, nil)
 	assertDenied(t, "login after cancel", resp, err, logical.ErrPermissionDenied, "may have been cancelled")
 
-	// Naming oneself is no impersonation.
+	// Naming oneself is no impersonation: the caller's own role applies.
+	writeRole(t, h.b, h.storage, "hive", map[string]interface{}{
+		"bound_principals": "hive/*@" + testRealm,
+		"token_policies":   "hive-keys",
+	})
 	resp = h.issue("hive/hs2.example.com", map[string]interface{}{"doas": "hive/hs2.example.com"})
 	if resp.Data["owner"] != hive || resp.Data["real_user"] != "" || resp.Data["role"] != "hive" {
 		t.Fatalf("issue for oneself: %#v", resp.Data)
@@ -700,24 +708,28 @@ func TestDelegation_DoAs(t *testing.T) {
 		t.Fatalf("login for oneself: err %v resp %#v", err, resp)
 	}
 
-	// So do rebinding the granting role away from the real user and deleting
-	// it.
+	// Rebinding the proxy away from the real user and deleting it suspend a
+	// token as well.
 	urlString = h.issue("hive/hs2.example.com", map[string]interface{}{"doas": "alice"}).Data["token"].(string)
-	writeRole(t, h.b, h.storage, "hive", map[string]interface{}{"bound_principals": "hive/other.example.com@" + testRealm})
+	writeProxy(t, h.b, h.storage, "hive", map[string]interface{}{"bound_principals": "hive/other.example.com@" + testRealm})
 	resp, err = h.login(urlString, nil)
-	assertDenied(t, "login after rebinding the grant", resp, err, logical.ErrPermissionDenied, "may no longer impersonate")
-	h.writeProxyRole()
+	assertDenied(t, "login after rebinding the proxy", resp, err, logical.ErrPermissionDenied, "may no longer impersonate")
+	h.writeProxy()
 	if resp, err := h.login(urlString, nil); err != nil || resp == nil || resp.Auth == nil {
-		t.Fatalf("login after binding the grant back: err %v resp %#v", err, resp)
+		t.Fatalf("login after binding the proxy back: err %v resp %#v", err, resp)
 	}
-	mustRequest(t, h.b, h.storage, logical.DeleteOperation, "roles/hive", nil)
+	mustRequest(t, h.b, h.storage, logical.DeleteOperation, "proxy/hive", nil)
 	resp, err = h.login(urlString, nil)
-	assertDenied(t, "login after deleting the grant", resp, err, logical.ErrPermissionDenied, "may no longer impersonate")
+	assertDenied(t, "login after deleting the proxy", resp, err, logical.ErrPermissionDenied, "may no longer impersonate")
 }
 
 func TestDelegation_DoAsRejections(t *testing.T) {
 	h := newDelegationHarness(t)
-	h.writeProxyRole()
+	h.writeProxy()
+	writeProxy(t, h.b, h.storage, "oozie", map[string]interface{}{
+		"bound_principals":   "oozie/*@" + testRealm,
+		"allowed_principals": "bob@" + testRealm,
+	})
 
 	hive := "hive/hs2.example.com"
 	for name, c := range map[string]struct {
@@ -727,11 +739,10 @@ func TestDelegation_DoAsRejections(t *testing.T) {
 		want   error
 		msg    string
 	}{
-		"not allowed":          {hive, "bob", "", logical.ErrPermissionDenied, `role "hive" of principal "` + hive + "@" + testRealm + `" does not allow impersonating "bob@` + testRealm + `"`},
-		"other realm":          {hive, "alice@OTHER.REALM", "", logical.ErrPermissionDenied, "does not allow impersonating"},
-		"no grant":             {"alice", "bob", "", logical.ErrPermissionDenied, `role "users" of principal "alice@` + testRealm + `" does not allow impersonating`},
-		"unbound caller":       {"eve", "alice", "", logical.ErrPermissionDenied, `no role is bound to principal "eve@` + testRealm + `"`},
-		"before owner roles":   {hive, "dave", "missing", logical.ErrPermissionDenied, "does not allow impersonating"},
+		"not allowed":          {hive, "bob", "", logical.ErrPermissionDenied, `principal "` + hive + "@" + testRealm + `" may not impersonate "bob@` + testRealm + `"`},
+		"other realm":          {hive, "alice@OTHER.REALM", "", logical.ErrPermissionDenied, "may not impersonate"},
+		"no proxy":             {"alice", "bob", "", logical.ErrPermissionDenied, `principal "alice@` + testRealm + `" may not impersonate`},
+		"before owner roles":   {hive, "dave", "missing", logical.ErrPermissionDenied, "may not impersonate"},
 		"owner without role":   {hive, "carol", "", logical.ErrPermissionDenied, `no role is bound to principal "carol@` + testRealm + `"`},
 		"owner role not bound": {hive, "alice", "hadoop", logical.ErrPermissionDenied, `role "hadoop" is not bound to principal "alice@` + testRealm + `"`},
 		"empty realm":          {hive, "alice@", "", logical.ErrInvalidRequest, `doas "alice@" is not a principal name`},
@@ -747,23 +758,29 @@ func TestDelegation_DoAsRejections(t *testing.T) {
 		assertDenied(t, name, resp, err, c.want, c.msg)
 	}
 
-	// The service's role must admit its address and be the only role bound
-	// to the service.
-	writeRole(t, h.b, h.storage, "hive", map[string]interface{}{"token_bound_cidrs": "192.0.2.0/24"})
-	if resp, err := h.spnego(hive, delegationTokenPathName, map[string]interface{}{"doas": "alice"}); !errors.Is(err, logical.ErrPermissionDenied) || resp != nil {
-		t.Fatalf("outside the service role's cidrs: err %v resp %#v", err, resp)
-	}
-	writeRole(t, h.b, h.storage, "hive", map[string]interface{}{"token_bound_cidrs": ""})
-	writeRole(t, h.b, h.storage, "hive-other", map[string]interface{}{
-		"bound_principals":         hive + "@" + testRealm,
-		"allowed_proxy_principals": "alice@" + testRealm,
+	// The proxy allowing the owner must admit the caller's address itself;
+	// another proxy admitting it does not help.
+	writeProxy(t, h.b, h.storage, "hive", map[string]interface{}{"bound_cidrs": "192.0.2.0/24,198.51.100.7"})
+	writeProxy(t, h.b, h.storage, "hive-bob", map[string]interface{}{
+		"bound_principals":   "hive/*@" + testRealm,
+		"allowed_principals": "bob@" + testRealm,
 	})
 	resp, err := h.spnego(hive, delegationTokenPathName, map[string]interface{}{"doas": "alice"})
-	assertDenied(t, "several service roles", resp, err, logical.ErrPermissionDenied, "is bound to roles hive, hive-other; impersonation requires exactly one")
-	mustRequest(t, h.b, h.storage, logical.DeleteOperation, "roles/hive-other", nil)
+	assertDenied(t, "outside the proxy's cidrs", resp, err, logical.ErrPermissionDenied, `may not impersonate "alice@`+testRealm+`" from address "10.1.2.3"`)
+	writeProxy(t, h.b, h.storage, "hive", map[string]interface{}{"bound_cidrs": "192.0.2.0/24,10.1.0.0/16"})
+	h.issue(hive, map[string]interface{}{"doas": "alice"})
+	mustRequest(t, h.b, h.storage, logical.DeleteOperation, "proxy/hive-bob", nil)
+	h.writeProxy()
+
+	// The caller's roles do not matter: here the service is bound both to a
+	// role of its own and to one covering the whole realm.
+	writeRole(t, h.b, h.storage, "users", map[string]interface{}{"bound_principals": "*@" + testRealm})
+	writeRole(t, h.b, h.storage, "hive", map[string]interface{}{"bound_principals": "hive/*@" + testRealm})
+	if resp := h.issue(hive, map[string]interface{}{"doas": "alice"}); resp.Data["role"] != "users" {
+		t.Fatalf("issue by a service bound to several roles: %#v", resp.Data)
+	}
 
 	// The owner's role must admit the caller's address as well.
-	h.issue(hive, map[string]interface{}{"doas": "alice"})
 	writeRole(t, h.b, h.storage, "users", map[string]interface{}{"token_bound_cidrs": "192.0.2.0/24"})
 	if resp, err := h.spnego(hive, delegationTokenPathName, map[string]interface{}{"doas": "alice"}); !errors.Is(err, logical.ErrPermissionDenied) || resp != nil {
 		t.Fatalf("outside the owner's role cidrs: err %v resp %#v", err, resp)
@@ -773,9 +790,9 @@ func TestDelegation_DoAsRejections(t *testing.T) {
 func TestDelegation_DoAsRealm(t *testing.T) {
 	h := newDelegationHarness(t)
 	const users = "USERS.REALM"
-	writeRole(t, h.b, h.storage, "hive", map[string]interface{}{
-		"bound_principals":         "hive/*@" + testRealm,
-		"allowed_proxy_principals": "*@" + users,
+	writeProxy(t, h.b, h.storage, "hive", map[string]interface{}{
+		"bound_principals":   "hive/*@" + testRealm,
+		"allowed_principals": "*@" + users,
 	})
 	writeRole(t, h.b, h.storage, "trusted", map[string]interface{}{
 		"bound_principals": "*@" + users,
@@ -815,7 +832,7 @@ func TestDelegation_DoAsRealm(t *testing.T) {
 	}
 	mustRequest(t, h.b, h.storage, logical.UpdateOperation, delegationConfigPath, map[string]interface{}{"doas_realm": ""})
 	resp, err = h.spnego("hive/hs2.example.com", delegationTokenPathName, map[string]interface{}{"doas": "alice"})
-	assertDenied(t, "short name without doas_realm", resp, err, logical.ErrPermissionDenied, `does not allow impersonating "alice@`+testRealm+`"`)
+	assertDenied(t, "short name without doas_realm", resp, err, logical.ErrPermissionDenied, `may not impersonate "alice@`+testRealm+`"`)
 
 	// The realm follows the last "@", so a principal name with "@" in it
 	// can name itself.

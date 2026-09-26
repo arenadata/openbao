@@ -152,8 +152,6 @@ $ bao write auth/kerberos/roles/hadoop \
 - The usual [token parameters](/api-docs/auth/kerberos#createupdate-role)
   (`token_policies`, `token_ttl`, `token_bound_cidrs`, ...) are available on
   the role.
-- `allowed_proxy_principals` lets the principals bound to this role alone
-  issue delegation tokens for other principals; see [Proxy users](#proxy-users).
 
 At login the authenticated principal is matched against every role, or only
 against the role named by the `role` parameter. Exactly one role must match:
@@ -273,15 +271,14 @@ realm:
 $ bao write auth/kerberos/config/delegation doas_realm=AD.MATRIX.LAN
 ```
 
-The role bound to the service, which must be its only role, lists the users
-in `allowed_proxy_principals`, the counterpart of
-`hadoop.proxyuser.<service>.users`:
+Who may act for whom is kept apart from roles, in proxies under `proxy/`,
+the counterpart of `hadoop.proxyuser.<name>.*`:
 
 ```shell-session
-$ bao write auth/kerberos/roles/hive \
+$ bao write auth/kerberos/proxy/hive \
     bound_principals="hive/*@MATRIX.LAN" \
-    allowed_proxy_principals="alice@MATRIX.LAN,bob@MATRIX.LAN" \
-    token_policies=hive-keys
+    allowed_principals="alice@MATRIX.LAN,bob@MATRIX.LAN" \
+    bound_cidrs="10.0.12.0/24"
 
 $ curl \
     --header "Authorization: Negotiate YIIFSw...sWw" \
@@ -290,34 +287,39 @@ $ curl \
     https://openbao.example.com:8200/v1/auth/kerberos/delegation/token
 ```
 
-- `allowed_proxy_principals` holds patterns matched against the full
-  principal name, like `bound_principals`; an entry needs a realm or a `*`.
-  A login with a token issued for a user is a login as that user: it gets
+- `bound_principals` matches the service and `allowed_principals` the users
+  it may act for, the counterpart of `hadoop.proxyuser.<name>.users`. Both
+  hold patterns matched against the full principal name, like the
+  `bound_principals` of a role; an entry needs a realm or a `*`.
+- `bound_cidrs`, if set, must contain the service's address, the counterpart
+  of `hadoop.proxyuser.<name>.hosts`. Host names are not accepted.
+- A request is granted when one proxy matches the service, the user and the
+  address. The service needs no role, and the roles bound to it do not
+  matter.
+- A login with a token issued for a user is a login as that user: it gets
   the policies of the user's role and the user's entity, with the policies
   of the entity and its groups, including those granted through other auth
-  methods. Keep the list to the users the service acts for: `*@MATRIX.LAN`
-  also covers every service principal of the realm.
-- The grant is taken only from the service's role, the one it logs in with,
-  so a service bound to several roles cannot impersonate anyone. The role's
-  `token_bound_cidrs`, if set, must contain the service's address, the
-  counterpart of `hadoop.proxyuser.<service>.hosts`.
+  methods. Keep `allowed_principals` to the users the service acts for:
+  `*@MATRIX.LAN` also covers every service principal of the realm. Whoever
+  can write `proxy/` can let a principal they control act as any user with a
+  role, so grant that access as carefully as access to `roles/`.
 - The user needs a role of their own, chosen by `role` or as the only role
   bound to them. The token records it, and its `token_bound_cidrs` apply to
   the service's address as well.
 - A short `renewer` is compared within the service's realm, not the user's.
 
 A login with the token names the service in the `real_user` metadata field,
-which the audit log records. The token also records the service's role. The
-login, each renewal of the token and each renewal of an OpenBao token from it
-check that this role still binds the service and lists the user. Removing the
-user from the list, rebinding the role or deleting it suspends the tokens
-already issued: they stop logging in and renewing and lapse within one
-`renew_interval`, unless the grant comes back first. OpenBao tokens already
-logged in run out at their TTL. Cancel the tokens, or delete
-`config/delegation`, to end them for good.
+which the audit log records. The login, each renewal of the token and each
+renewal of an OpenBao token from it check that a proxy still lets the
+service act for the user, whatever its `bound_cidrs`. Once no proxy does,
+the tokens already issued are suspended: they stop logging in and renewing
+and lapse within one `renew_interval`, unless a proxy allows them again
+first.
+OpenBao tokens already logged in run out at their TTL. Cancel the tokens, or
+delete `config/delegation`, to end them for good.
 
-Besides the owner and the renewer, a principal allowed to impersonate the
-owner, from an address its role admits, may cancel a token, as it can in
+Besides the owner and the renewer, a principal that a proxy lets act for the
+owner, from an address the proxy admits, may cancel a token, as it can in
 Hadoop by acting as the owner.
 
 A server without proxy user support ignores `doas`, with a warning, and

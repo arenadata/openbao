@@ -6,7 +6,6 @@ package kerberos
 import (
 	"context"
 	"regexp"
-	"strings"
 
 	"github.com/hashicorp/go-secure-stdlib/strutil"
 	"github.com/openbao/openbao/sdk/v2/framework"
@@ -27,18 +26,10 @@ type kerberosRole struct {
 	// Glob patterns matched against the full principal name
 	// (`primary/instance@REALM`); any match is sufficient.
 	BoundPrincipals []string `json:"bound_principals"`
-
-	// Glob patterns matched against the full principal name of the owner a
-	// principal bound to this role may request delegation tokens for.
-	AllowedProxyPrincipals []string `json:"allowed_proxy_principals,omitempty"`
 }
 
 func (r *kerberosRole) matches(principal string) bool {
 	return strutil.StrListContainsGlob(r.BoundPrincipals, principal)
-}
-
-func (r *kerberosRole) allowsProxy(owner string) bool {
-	return strutil.StrListContainsGlob(r.AllowedProxyPrincipals, owner)
 }
 
 func (b *backend) pathRolesList() *framework.Path {
@@ -92,14 +83,6 @@ func (b *backend) pathRoles() *framework.Path {
 				Description: `Comma-separated list of Kerberos principals allowed to log in
 with this role. Each entry is matched against the full principal name
 (primary/instance@REALM) and may contain "*" globs. Required.`,
-			},
-			"allowed_proxy_principals": {
-				Type: framework.TypeCommaStringSlice,
-				Description: `Comma-separated list of principals that principals bound to
-this role, and to no other, may request delegation tokens for with "doas".
-Each entry is matched against the full principal name (primary@REALM or
-primary/instance@REALM) and may contain "*" globs. Empty forbids
-impersonation.`,
 			},
 		},
 
@@ -167,14 +150,6 @@ func (b *backend) matchingRoles(ctx context.Context, s logical.Storage, principa
 	return matched, nil
 }
 
-func roleNames(roles []*kerberosRole) string {
-	names := make([]string, 0, len(roles))
-	for _, role := range roles {
-		names = append(names, role.Name)
-	}
-	return strings.Join(names, ", ")
-}
-
 func (b *backend) pathRoleExistenceCheck(ctx context.Context, req *logical.Request, d *framework.FieldData) (bool, error) {
 	role, err := b.role(ctx, req.Storage, d.Get("name").(string))
 	if err != nil {
@@ -205,11 +180,7 @@ func (b *backend) pathRoleRead(ctx context.Context, req *logical.Request, d *fra
 	}
 
 	data := map[string]interface{}{
-		"bound_principals":         role.BoundPrincipals,
-		"allowed_proxy_principals": role.AllowedProxyPrincipals,
-	}
-	if len(role.AllowedProxyPrincipals) == 0 {
-		data["allowed_proxy_principals"] = []string{}
+		"bound_principals": role.BoundPrincipals,
 	}
 	role.PopulateTokenData(data)
 
@@ -240,15 +211,6 @@ func (b *backend) pathRoleWrite(ctx context.Context, req *logical.Request, d *fr
 	}
 	if len(role.BoundPrincipals) == 0 {
 		return logical.ErrorResponse("bound_principals must contain at least one entry"), logical.ErrInvalidRequest
-	}
-	if raw, ok := d.GetOk("allowed_proxy_principals"); ok {
-		role.AllowedProxyPrincipals = strutil.RemoveEmpty(raw.([]string))
-	}
-	// A token owner always carries a realm, so such an entry never matches.
-	for _, p := range role.AllowedProxyPrincipals {
-		if !strings.ContainsAny(p, "@*") {
-			return logical.ErrorResponse("allowed_proxy_principals entry %q has no realm", p), logical.ErrInvalidRequest
-		}
 	}
 
 	if err := role.ParseTokenFields(req, d); err != nil {
@@ -284,6 +246,5 @@ LDAP lookup. They are consulted only when "config/ldap" is not set. At login
 the authenticated principal (primary/instance@REALM) is matched against
 "bound_principals" of the role named in the request or, without a role name,
 of every role. Exactly one role must match; the login is denied when none or
-several do. "allowed_proxy_principals" lets principals bound to this role
-alone request delegation tokens owned by other principals.
+several do.
 `

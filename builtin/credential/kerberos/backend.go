@@ -71,6 +71,8 @@ func Backend() *backend {
 				b.pathGroupsList(),
 				b.pathRoles(),
 				b.pathRolesList(),
+				b.pathProxies(),
+				b.pathProxiesList(),
 				b.pathDelegationToken(),
 				b.pathDelegationRenew(),
 				b.pathDelegationCancel(),
@@ -106,5 +108,6 @@ Policies are resolved either from LDAP group membership ("config/ldap" and
 "groups/") or, when LDAP is not configured, from roles binding Kerberos
 principals directly ("roles/"). With roles, "config/delegation" enables
 Hadoop-style delegation tokens that Kerberos-authenticated principals issue
-for processes without Kerberos credentials.
+for processes without Kerberos credentials, and "proxy/" lets services issue
+them for other principals.
 `

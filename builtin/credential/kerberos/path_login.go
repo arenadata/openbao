@@ -434,8 +434,12 @@ func (b *backend) selectRole(ctx context.Context, s logical.Storage, principal, 
 	case len(roles) == 0:
 		return nil, logical.ErrorResponse("no role is bound to principal %q", principal), logical.ErrPermissionDenied
 	case len(roles) > 1:
+		names := make([]string, 0, len(roles))
+		for _, role := range roles {
+			names = append(names, role.Name)
+		}
 		return nil, logical.ErrorResponse("principal %q is bound to roles %s; pass role to select one",
-			principal, roleNames(roles)), logical.ErrPermissionDenied
+			principal, strings.Join(names, ", ")), logical.ErrPermissionDenied
 	}
 	return roles[0], nil, nil
 }
@@ -470,8 +474,8 @@ func (b *backend) loginWithRoles(ctx context.Context, req *logical.Request, iden
 
 // loginWithDelegationToken logs in as the owner of a delegation token with
 // the role fixed at issuance. The token's remaining renewable lifetime caps
-// the issued OpenBao token. A token with a real user also needs the role
-// that granted the impersonation to still grant it.
+// the issued OpenBao token. A token with a real user also needs a proxy to
+// still let the real user impersonate the owner.
 func (b *backend) loginWithDelegationToken(ctx context.Context, req *logical.Request, urlString string) (*logical.Response, error) {
 	cfg, resp, err := b.delegationEnabled(ctx, req)
 	if err != nil || resp != nil {
@@ -494,7 +498,7 @@ func (b *backend) loginWithDelegationToken(ctx context.Context, req *logical.Req
 	if err := checkBoundCIDRs(b, req, role.TokenBoundCIDRs); err != nil {
 		return nil, err
 	}
-	denial, err := b.proxyGrantDenial(ctx, req.Storage, id, entry)
+	denial, err := b.revokedImpersonation(ctx, req.Storage, id)
 	if err != nil {
 		return nil, err
 	}
@@ -594,7 +598,7 @@ func (b *backend) checkDelegationTokenUsable(ctx context.Context, s logical.Stor
 	if err != nil {
 		return fmt.Errorf("invalid delegation token %s: %w", seq, err)
 	}
-	denial, err := b.proxyGrantDenial(ctx, s, id, entry)
+	denial, err := b.revokedImpersonation(ctx, s, id)
 	if err != nil {
 		return err
 	}

@@ -50,18 +50,15 @@ type delegationTokenEntry struct {
 	Identifier []byte    `json:"identifier"`
 	Expiry     time.Time `json:"expiry"`
 	Role       string    `json:"role"`
-	// ProxyRole is the role that let the real user impersonate the owner.
-	ProxyRole string `json:"proxy_role,omitempty"`
 }
 
 // delegationRequest is what a caller asks a new token for.
 type delegationRequest struct {
-	Owner     string
-	RealUser  string
-	Renewer   string
-	Service   string
-	Role      string
-	ProxyRole string
+	Owner    string
+	RealUser string
+	Renewer  string
+	Service  string
+	Role     string
 	// MaxLifetime is capped by the configured one; zero means that one.
 	MaxLifetime time.Duration
 }
@@ -213,7 +210,6 @@ func (b *backend) issueDelegationToken(ctx context.Context, s logical.Storage, c
 		Identifier: id.marshal(),
 		Expiry:     delegationExpiry(now, cfg, id),
 		Role:       r.Role,
-		ProxyRole:  r.ProxyRole,
 	}
 	if err := putJSON(ctx, s, delegationTokenPath(seq), entry); err != nil {
 		return nil, nil, nil, err

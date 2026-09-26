@@ -67,22 +67,6 @@ func TestRoles_CRUD(t *testing.T) {
 	if got := resp.Data["token_ttl"]; got != int64(300) {
 		t.Fatalf("token_ttl: got %#v", got)
 	}
-	if got := resp.Data["allowed_proxy_principals"]; !reflect.DeepEqual(got, []string{}) {
-		t.Fatalf("allowed_proxy_principals: got %#v", got)
-	}
-
-	writeRole(t, b, storage, "hadoop", map[string]interface{}{
-		"allowed_proxy_principals": "alice@EXAMPLE.COM, *@OTHER.COM,",
-	})
-	resp = mustRequest(t, b, storage, logical.ReadOperation, "roles/hadoop", nil)
-	if got := resp.Data["allowed_proxy_principals"]; !reflect.DeepEqual(got, []string{"alice@EXAMPLE.COM", "*@OTHER.COM"}) {
-		t.Fatalf("allowed_proxy_principals after update: got %#v", got)
-	}
-	writeRole(t, b, storage, "hadoop", map[string]interface{}{"allowed_proxy_principals": ""})
-	resp = mustRequest(t, b, storage, logical.ReadOperation, "roles/hadoop", nil)
-	if got := resp.Data["allowed_proxy_principals"]; !reflect.DeepEqual(got, []string{}) {
-		t.Fatalf("allowed_proxy_principals after clearing: got %#v", got)
-	}
 
 	resp = mustRequest(t, b, storage, logical.ListOperation, "roles/", nil)
 	if got := resp.Data["keys"]; !reflect.DeepEqual(got, []string{"hadoop"}) {
@@ -118,7 +102,6 @@ func TestRoles_RejectsBadWrites(t *testing.T) {
 		"missing bound_principals": {"token_policies": "x"},
 		"empty entries only":       {"bound_principals": " , "},
 		"period above max ttl":     {"bound_principals": "*@EXAMPLE.COM", "token_period": "48h"},
-		"proxy entry sans realm":   {"bound_principals": "*@EXAMPLE.COM", "allowed_proxy_principals": "alice@EXAMPLE.COM,bob"},
 	}
 	for name, data := range cases {
 		resp, err := doRequest(t, b, storage, logical.UpdateOperation, "roles/bad", data)

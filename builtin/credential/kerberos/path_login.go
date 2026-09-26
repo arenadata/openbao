@@ -498,7 +498,7 @@ func (b *backend) loginWithDelegationToken(ctx context.Context, req *logical.Req
 	if err := checkBoundCIDRs(b, req, role.TokenBoundCIDRs); err != nil {
 		return nil, err
 	}
-	denial, err := b.revokedImpersonation(ctx, req.Storage, id)
+	denial, err := b.revokedImpersonation(ctx, req.Storage, id, entry)
 	if err != nil {
 		return nil, err
 	}
@@ -589,21 +589,21 @@ func (b *backend) checkDelegationTokenUsable(ctx context.Context, s logical.Stor
 		return fmt.Errorf("failed to read delegation token %s: %w", seq, err)
 	}
 	if entry == nil || !hmac.Equal(entry.Identifier, identifier) {
-		return fmt.Errorf("delegation token %s has been cancelled", seq)
+		return fmt.Errorf("delegation token %s has been cancelled: %w", seq, logical.ErrPermissionDenied)
 	}
 	if !b.now().Before(entry.Expiry) {
-		return fmt.Errorf("delegation token %s has expired", seq)
+		return fmt.Errorf("delegation token %s has expired: %w", seq, logical.ErrPermissionDenied)
 	}
 	id, err := unmarshalIdentifier(entry.Identifier)
 	if err != nil {
 		return fmt.Errorf("invalid delegation token %s: %w", seq, err)
 	}
-	denial, err := b.revokedImpersonation(ctx, s, id)
+	denial, err := b.revokedImpersonation(ctx, s, id, entry)
 	if err != nil {
 		return err
 	}
 	if denial != "" {
-		return errors.New(denial)
+		return fmt.Errorf("%s: %w", denial, logical.ErrPermissionDenied)
 	}
 	return nil
 }

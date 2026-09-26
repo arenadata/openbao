@@ -36,6 +36,10 @@ type backend struct {
 	delegationLock sync.Mutex
 	lastCleanup    time.Time
 	now            func() time.Time
+
+	// proxyLock orders proxy writes and deletes against scans of proxy/,
+	// which list the entries and then read them one by one.
+	proxyLock sync.RWMutex
 }
 
 func Factory(ctx context.Context, c *logical.BackendConfig) (logical.Backend, error) {

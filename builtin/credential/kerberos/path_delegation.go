@@ -16,6 +16,7 @@ import (
 	"github.com/go-krb5/krb5/types"
 	goidentity "github.com/go-krb5/x/identity"
 	"github.com/openbao/openbao/sdk/v2/framework"
+	"github.com/openbao/openbao/sdk/v2/helper/cidrutil"
 	"github.com/openbao/openbao/sdk/v2/logical"
 )
 
@@ -42,12 +43,13 @@ func (b *backend) pathDelegationToken() *framework.Path {
 			Type: framework.TypeString,
 			Description: `Name allowed to renew the token, compared against the renewing
 principal's full name or, within the realm of the principal requesting the
-token, its primary/instance or primary. Empty makes the token
-non-renewable.`,
+token, its primary/instance or primary. At most 1024 bytes, without
+spaces. Empty makes the token non-renewable.`,
 		},
 		"service": {
-			Type:        framework.TypeString,
-			Description: `Hadoop token service written into the token. Optional.`,
+			Type: framework.TypeString,
+			Description: `Hadoop token service written into the token, at most 1024
+bytes. Optional.`,
 		},
 		"max_lifetime": {
 			Type: framework.TypeDurationSecond,
@@ -157,6 +159,15 @@ func (b *backend) pathDelegationTokenUpdate(ctx context.Context, req *logical.Re
 			return logical.ErrorResponse("doas must be a string"), logical.ErrInvalidRequest
 		}
 	}
+	// Either would make the token undecodable, and so impossible to cancel.
+	renewer := d.Get("renewer").(string)
+	if len(renewer) > maxParamLength || !validPrincipalText(renewer) {
+		return logical.ErrorResponse("renewer must be a principal name of at most %d bytes", maxParamLength), logical.ErrInvalidRequest
+	}
+	service := d.Get("service").(string)
+	if len(service) > maxParamLength || !utf8.ValidString(service) {
+		return logical.ErrorResponse("service must be valid UTF-8 of at most %d bytes", maxParamLength), logical.ErrInvalidRequest
+	}
 
 	identity, cfg, resp, err := b.delegationCaller(ctx, req, d)
 	if err != nil || resp != nil {
@@ -164,7 +175,7 @@ func (b *backend) pathDelegationTokenUpdate(ctx context.Context, req *logical.Re
 	}
 
 	caller := fullPrincipal(identity)
-	owner, realUser := caller, ""
+	owner, realUser, proxyName := caller, "", ""
 	if doas := d.Get("doas").(string); doas != "" {
 		realm := cfg.DoasRealm
 		if realm == "" {
@@ -177,14 +188,14 @@ func (b *backend) pathDelegationTokenUpdate(ctx context.Context, req *logical.Re
 	if owner != caller {
 		// Checked before the owner's roles, so a caller cannot probe role
 		// bindings.
-		denial, err := b.impersonationDenial(ctx, req, caller, owner)
+		proxy, denial, err := b.grantingProxy(ctx, req, caller, owner)
 		if err != nil {
 			return nil, err
 		}
 		if denial != "" {
 			return logical.ErrorResponse(denial), logical.ErrPermissionDenied
 		}
-		realUser = caller
+		realUser, proxyName = caller, proxy.Name
 	}
 
 	role, resp, err := b.selectRole(ctx, req.Storage, owner, roleName)
@@ -195,8 +206,6 @@ func (b *backend) pathDelegationTokenUpdate(ctx context.Context, req *logical.Re
 		return nil, err
 	}
 
-	renewer := d.Get("renewer").(string)
-	service := d.Get("service").(string)
 	maxLifetime := time.Duration(d.Get("max_lifetime").(int)) * time.Second
 
 	b.delegationLock.Lock()
@@ -221,6 +230,7 @@ func (b *backend) pathDelegationTokenUpdate(ctx context.Context, req *logical.Re
 		Renewer:     renewer,
 		Service:     service,
 		Role:        role.Name,
+		Proxy:       proxyName,
 		MaxLifetime: maxLifetime,
 	})
 	if err != nil {
@@ -230,7 +240,7 @@ func (b *backend) pathDelegationTokenUpdate(ctx context.Context, req *logical.Re
 		return nil, err
 	}
 
-	b.Logger().Debug("issued delegation token", "sequence", id.SequenceNumber, "owner", id.Owner, "real_user", id.RealUser, "renewer", id.Renewer, "role", role.Name)
+	b.Logger().Debug("issued delegation token", "sequence", id.SequenceNumber, "owner", id.Owner, "real_user", id.RealUser, "proxy", proxyName, "renewer", id.Renewer, "role", role.Name)
 	return &logical.Response{
 		Data: map[string]interface{}{
 			"token":           tok.encodeURLString(),
@@ -269,7 +279,7 @@ func (b *backend) pathDelegationRenewUpdate(ctx context.Context, req *logical.Re
 	if !renewerMatches(identity, id) {
 		return logical.ErrorResponse("principal %q is not the renewer %q of delegation token %d", fullPrincipal(identity), id.Renewer, id.SequenceNumber), logical.ErrPermissionDenied
 	}
-	denial, err := b.revokedImpersonation(ctx, req.Storage, id)
+	denial, err := b.revokedImpersonation(ctx, req.Storage, id, entry)
 	if err != nil {
 		return nil, err
 	}
@@ -309,7 +319,7 @@ func (b *backend) pathDelegationCancelUpdate(ctx context.Context, req *logical.R
 	if caller != id.Owner && (id.Renewer == "" || !renewerMatches(identity, id)) {
 		// A principal allowed to impersonate the owner may cancel too, as in
 		// Hadoop, where it cancels as the owner.
-		denial, err := b.impersonationDenial(ctx, req, caller, id.Owner)
+		_, denial, err := b.grantingProxy(ctx, req, caller, id.Owner)
 		if err != nil {
 			return nil, err
 		}
@@ -334,52 +344,60 @@ func doasPrincipal(doas, realm string) (string, error) {
 	if i := strings.LastIndex(doas, "@"); i >= 0 {
 		name, realm = doas[:i], doas[i+1:]
 	}
-	if len(doas) > maxDoasLength || !validPrincipalText(doas) || realm == "" || slices.Contains(strings.Split(name, "/"), "") {
+	if len(doas) > maxParamLength || !validPrincipalText(doas) || realm == "" || slices.Contains(strings.Split(name, "/"), "") {
 		return "", fmt.Errorf("doas %q is not a principal name", doas)
 	}
 	return name + "@" + realm, nil
 }
 
-// maxDoasLength bounds a doas value well below the identifier's field limit.
-const maxDoasLength = 1024
+// maxParamLength bounds the doas, renewer and service parameters well below
+// the codec's field limit.
+const maxParamLength = 1024
 
 // validPrincipalText rejects invalid UTF-8, spaces and other non-printing
-// characters, and the characters role pattern lists give a meaning to.
+// characters, and the characters principal pattern lists give a meaning to.
 func validPrincipalText(s string) bool {
 	return utf8.ValidString(s) && !strings.ContainsFunc(s, func(r rune) bool {
 		return !unicode.IsPrint(r) || strings.ContainsRune(" *,", r)
 	})
 }
 
-// impersonationDenial explains why realUser may not request tokens owned by
-// owner from the address of req. It is empty when a proxy allows it.
-func (b *backend) impersonationDenial(ctx context.Context, req *logical.Request, realUser, owner string) (string, error) {
+// grantingProxy returns a proxy that lets realUser request tokens owned by
+// owner from the address of req, or the denial explaining why none does.
+func (b *backend) grantingProxy(ctx context.Context, req *logical.Request, realUser, owner string) (*kerberosProxy, string, error) {
 	proxies, err := b.matchingProxies(ctx, req.Storage, realUser, owner)
 	if err != nil {
-		return "", fmt.Errorf("unable to match proxies: %w", err)
+		return nil, "", fmt.Errorf("unable to match proxies: %w", err)
 	}
 	if len(proxies) == 0 {
-		return fmt.Sprintf("principal %q may not impersonate %q", realUser, owner), nil
+		return nil, fmt.Sprintf("principal %q may not impersonate %q", realUser, owner), nil
 	}
+	addr := remoteAddr(req)
 	for _, proxy := range proxies {
-		if checkBoundCIDRs(b, req, proxy.BoundCIDRs) == nil {
-			return "", nil
+		if cidrutil.RemoteAddrIsOk(addr, proxy.BoundCIDRs) {
+			return proxy, "", nil
 		}
 	}
-	addr := ""
-	if req.Connection != nil {
-		addr = req.Connection.RemoteAddr
-	}
-	return fmt.Sprintf("principal %q may not impersonate %q from address %q", realUser, owner, addr), nil
+	return nil, fmt.Sprintf("principal %q may not impersonate %q from address %q", realUser, owner, addr), nil
 }
 
 // revokedImpersonation explains why a token with a real user may no longer
-// be used: no proxy lets the real user impersonate the owner any more. It is
-// empty for a token without a real user and while a proxy allows it.
-// Addresses are not checked, as the token is not used from the real user's.
-func (b *backend) revokedImpersonation(ctx context.Context, s logical.Storage, id *delegationTokenIdentifier) (string, error) {
+// be used: no proxy lets the real user impersonate the owner any more, the
+// one that allowed the issuance being tried first. It is empty for a token
+// without a real user and while a proxy allows it. Addresses are not
+// checked, as the token is not used from the real user's.
+func (b *backend) revokedImpersonation(ctx context.Context, s logical.Storage, id *delegationTokenIdentifier, entry *delegationTokenEntry) (string, error) {
 	if id.RealUser == "" {
 		return "", nil
+	}
+	if entry.Proxy != "" {
+		proxy, err := b.proxy(ctx, s, entry.Proxy)
+		if err != nil {
+			return "", fmt.Errorf("unable to read proxy %q: %w", entry.Proxy, err)
+		}
+		if proxy != nil && proxy.allows(id.RealUser, id.Owner) {
+			return "", nil
+		}
 	}
 	proxies, err := b.matchingProxies(ctx, s, id.RealUser, id.Owner)
 	if err != nil {

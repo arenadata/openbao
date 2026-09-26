@@ -6,7 +6,11 @@ package kerberos
 import (
 	"context"
 	"fmt"
+	"net/netip"
+	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/hashicorp/go-secure-stdlib/parseutil"
 	"github.com/hashicorp/go-secure-stdlib/strutil"
@@ -90,19 +94,18 @@ func (b *backend) pathProxies() *framework.Path {
 				Type: framework.TypeCommaStringSlice,
 				Description: `Comma-separated list of principals allowed to request
 delegation tokens for other principals with "doas". Each entry is matched
-against the full principal name (primary/instance@REALM), may contain "*"
-globs and needs a realm or a "*". Required.`,
+against the full principal name (primary/instance@REALM) and needs a realm
+after its last "@", "*" for any realm. "*" is the only wildcard and also
+matches "/" and "@". Required.`,
 			},
 			"allowed_principals": {
 				Type: framework.TypeCommaStringSlice,
 				Description: `Comma-separated list of principals the bound principals may
-request delegation tokens for. Each entry is matched against the full
-principal name (primary@REALM or primary/instance@REALM), may contain "*"
-globs and needs a realm or a "*". Required.`,
+request delegation tokens for, written like bound_principals. Required.`,
 			},
 			"bound_cidrs": {
 				Type: framework.TypeCommaStringSlice,
-				Description: `Comma-separated list of CIDR blocks or IP addresses the
+				Description: `Comma-separated list of IP addresses or CIDR blocks the
 bound principals must request tokens from. Empty allows any address.`,
 			},
 		},
@@ -146,6 +149,9 @@ func (b *backend) proxy(ctx context.Context, s logical.Storage, name string) (*k
 // matchingProxies returns the proxies letting realUser request tokens owned
 // by owner, ordered by name.
 func (b *backend) matchingProxies(ctx context.Context, s logical.Storage, realUser, owner string) ([]*kerberosProxy, error) {
+	b.proxyLock.RLock()
+	defer b.proxyLock.RUnlock()
+
 	names, err := s.ListPage(ctx, proxyPrefix, "", -1)
 	if err != nil {
 		return nil, err
@@ -207,7 +213,22 @@ func (b *backend) pathProxyRead(ctx context.Context, req *logical.Request, d *fr
 }
 
 func (b *backend) pathProxyWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	// The framework would ignore them without a warning, and a misspelled
+	// bound_cidrs would leave the proxy unrestricted.
+	var unknown []string
+	for k := range d.Raw {
+		if _, ok := d.Schema[k]; !ok {
+			unknown = append(unknown, k)
+		}
+	}
+	if len(unknown) > 0 {
+		slices.Sort(unknown)
+		return logical.ErrorResponse("unknown parameters: %s", strings.Join(unknown, ", ")), logical.ErrInvalidRequest
+	}
 	name := d.Get("name").(string)
+
+	b.proxyLock.Lock()
+	defer b.proxyLock.Unlock()
 
 	txRollback, err := logical.StartTxStorage(ctx, req)
 	if err != nil {
@@ -230,16 +251,9 @@ func (b *backend) pathProxyWrite(ctx context.Context, req *logical.Request, d *f
 		proxy.AllowedPrincipals = strutil.RemoveEmpty(raw.([]string))
 	}
 	if raw, ok := d.GetOk("bound_cidrs"); ok {
-		entries := strutil.RemoveEmpty(raw.([]string))
-		cidrs, err := parseutil.ParseAddrs(entries)
+		cidrs, err := parseBoundCIDRs(strutil.RemoveEmpty(raw.([]string)))
 		if err != nil {
-			return logical.ErrorResponse("invalid bound_cidrs: %s", err), logical.ErrInvalidRequest
-		}
-		// A malformed block with a "/" parses as a UNIX socket path.
-		for i, cidr := range cidrs {
-			if cidr.Type()&sockaddr.TypeIP == 0 {
-				return logical.ErrorResponse("bound_cidrs entry %q is not an IP address or CIDR block", entries[i]), logical.ErrInvalidRequest
-			}
+			return logical.ErrorResponse(err.Error()), logical.ErrInvalidRequest
 		}
 		proxy.BoundCIDRs = cidrs
 	}
@@ -250,32 +264,57 @@ func (b *backend) pathProxyWrite(ctx context.Context, req *logical.Request, d *f
 		return logical.ErrorResponse(err.Error()), logical.ErrInvalidRequest
 	}
 
-	entry, err := logical.StorageEntryJSON(proxyPrefix+name, proxy)
-	if err != nil {
-		return nil, err
-	}
-	if err := req.Storage.Put(ctx, entry); err != nil {
+	if err := putJSON(ctx, req.Storage, proxyPrefix+name, proxy); err != nil {
 		return nil, err
 	}
 
 	return nil, logical.EndTxStorage(ctx, req)
 }
 
-// checkPrincipalPatterns rejects an empty list and entries that never match:
-// a principal name always carries a realm.
+// checkPrincipalPatterns rejects an empty list and entries that cannot match
+// a principal: each needs a name and, after its last "@", a realm, which "*"
+// stands in for to match any. Only "*" is a wildcard.
 func checkPrincipalPatterns(field string, patterns []string) error {
 	if len(patterns) == 0 {
 		return fmt.Errorf("%s must contain at least one entry", field)
 	}
 	for _, p := range patterns {
-		if !strings.ContainsAny(p, "@*") {
-			return fmt.Errorf("%s entry %q has no realm", field, p)
+		i := strings.LastIndex(p, "@")
+		switch {
+		case i < 0 || i == len(p)-1:
+			return fmt.Errorf(`%s entry %q has no realm; use "@*" for any realm`, field, p)
+		case slices.Contains(strings.Split(p[:i], "/"), ""):
+			return fmt.Errorf("%s entry %q has an empty name component", field, p)
+		case !utf8.ValidString(p) || strings.ContainsFunc(p, func(r rune) bool {
+			return !unicode.IsPrint(r) || r == '?' || r == '['
+		}):
+			return fmt.Errorf(`%s entry %q is not a principal pattern; "*" is the only wildcard`, field, p)
 		}
 	}
 	return nil
 }
 
+// parseBoundCIDRs accepts IP addresses and CIDR blocks only; on its own,
+// parseutil.ParseAddrs also takes host:port, resolving the host, as well as
+// hex netmasks and UNIX socket paths.
+func parseBoundCIDRs(entries []string) ([]*sockaddr.SockAddrMarshaler, error) {
+	for _, e := range entries {
+		prefix, err := netip.ParsePrefix(e)
+		addr := prefix.Addr()
+		if err != nil {
+			addr, err = netip.ParseAddr(e)
+		}
+		if err != nil || addr.Is4In6() || addr.Zone() != "" {
+			return nil, fmt.Errorf("bound_cidrs entry %q is not an IP address or CIDR block", e)
+		}
+	}
+	return parseutil.ParseAddrs(entries)
+}
+
 func (b *backend) pathProxyDelete(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	b.proxyLock.Lock()
+	defer b.proxyLock.Unlock()
+
 	return nil, req.Storage.Delete(ctx, proxyPrefix+d.Get("name").(string))
 }
 
@@ -290,6 +329,7 @@ owner in the "doas" parameter of "delegation/token", as a Hadoop proxy user
 does. With "bound_cidrs" set, the request must also come from one of those
 addresses. Any proxy satisfying all of these grants the request. The
 counterparts in Hadoop are hadoop.proxyuser.<name>.users and
-hadoop.proxyuser.<name>.hosts. Proxies are independent of roles: the
-requesting principal needs no role, while the owner needs one as usual.
+hadoop.proxyuser.<name>.hosts; hadoop.proxyuser.<name>.groups has none.
+Proxies are independent of roles: the requesting principal needs no role,
+while the owner needs one as usual.
 `

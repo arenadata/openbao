@@ -280,6 +280,22 @@ func TestDelegation_Rejections(t *testing.T) {
 	resp, err = h.spnego("carol", delegationTokenPathName, nil)
 	assertDenied(t, "issue for unbound principal", resp, err, logical.ErrPermissionDenied, "no role is bound")
 
+	// Such a token could not be decoded, not even to cancel it.
+	long := strings.Repeat("a", maxParamLength+1)
+	for name, data := range map[string]map[string]interface{}{
+		"renewer not UTF-8":  {"renewer": "\xff"},
+		"renewer with space": {"renewer": "yarn rm"},
+		"renewer too long":   {"renewer": long},
+		"service not UTF-8":  {"service": "\xff"},
+		"service too long":   {"service": long},
+	} {
+		resp, err := h.spnego("alice", delegationTokenPathName, data)
+		assertDenied(t, name, resp, err, logical.ErrInvalidRequest, "must be")
+	}
+	if keys := h.list(delegationTokenPrefix); len(keys) != 0 {
+		t.Fatalf("rejected requests issued tokens: %v", keys)
+	}
+
 	urlString := h.issue("alice", map[string]interface{}{"renewer": "yarn"}).Data["token"].(string)
 	tok, err := decodeURLString(urlString)
 	if err != nil {
@@ -577,9 +593,9 @@ func TestDelegation_CallerMatches(t *testing.T) {
 	}
 }
 
-// writeProxy lets hive/* impersonate alice and carol from any address;
-// carol is bound to no role of her own, hive to none at all.
-func (h *delegationHarness) writeProxy() {
+// resetHiveProxy lets hive/* impersonate alice and carol from any address;
+// carol is bound to no role of her own.
+func (h *delegationHarness) resetHiveProxy() {
 	h.t.Helper()
 	writeProxy(h.t, h.b, h.storage, "hive", map[string]interface{}{
 		"bound_principals":   "hive/*@" + testRealm,
@@ -612,7 +628,7 @@ func (h *delegationHarness) renewAuth(auth *logical.Auth) (*logical.Response, er
 
 func TestDelegation_DoAs(t *testing.T) {
 	h := newDelegationHarness(t)
-	h.writeProxy()
+	h.resetHiveProxy()
 	ctx := context.Background()
 	hive := "hive/hs2.example.com@" + testRealm
 	alice := "alice@" + testRealm
@@ -628,7 +644,7 @@ func TestDelegation_DoAs(t *testing.T) {
 	if id := h.identifier(urlString); id.Owner != alice || id.RealUser != hive || id.Renewer != "yarn" {
 		t.Fatalf("identifier %+v", id)
 	}
-	if entry, err := h.b.delegationTokenEntry(ctx, h.storage, 1); err != nil || entry == nil || entry.Role != "users" {
+	if entry, err := h.b.delegationTokenEntry(ctx, h.storage, 1); err != nil || entry == nil || entry.Role != "users" || entry.Proxy != "hive" {
 		t.Fatalf("token record: err %v entry %+v", err, entry)
 	}
 
@@ -651,7 +667,7 @@ func TestDelegation_DoAs(t *testing.T) {
 	revoked := `real user "` + hive + `" of delegation token 1 may no longer impersonate "` + alice + `"`
 	resp, err = h.login(urlString, nil)
 	assertDenied(t, "login after revocation", resp, err, logical.ErrPermissionDenied, revoked)
-	if _, err := h.renewAuth(auth); err == nil || !strings.Contains(err.Error(), revoked) {
+	if _, err := h.renewAuth(auth); !errors.Is(err, logical.ErrPermissionDenied) || !strings.Contains(err.Error(), revoked) {
 		t.Fatalf("token renew after revocation: %v", err)
 	}
 	resp, err = h.spnego("yarn/rm.example.com", delegationRenewPathName, map[string]interface{}{"token": urlString})
@@ -675,7 +691,7 @@ func TestDelegation_DoAs(t *testing.T) {
 		t.Fatalf("renew after restoring: err %v resp %#v", err, resp)
 	}
 	mustRequest(t, h.b, h.storage, logical.DeleteOperation, "proxy/hive-alice", nil)
-	h.writeProxy()
+	h.resetHiveProxy()
 	resp, err = h.spnego("hive/hs2.example.com", delegationRenewPathName, map[string]interface{}{"token": urlString})
 	assertDenied(t, "renew by real user", resp, err, logical.ErrPermissionDenied, "is not the renewer")
 
@@ -687,7 +703,7 @@ func TestDelegation_DoAs(t *testing.T) {
 	writeProxy(t, h.b, h.storage, "hive", map[string]interface{}{"bound_cidrs": "192.0.2.0/24"})
 	resp, err = h.spnego("hive/hs2.example.com", delegationCancelPathName, map[string]interface{}{"token": urlString})
 	assertDenied(t, "cancel outside the proxy's cidrs", resp, err, logical.ErrPermissionDenied, "may not impersonate its owner")
-	h.writeProxy()
+	h.resetHiveProxy()
 	if resp, err := h.spnego("hive/hs2b.example.com", delegationCancelPathName, map[string]interface{}{"token": urlString}); err != nil || resp != nil {
 		t.Fatalf("cancel by another instance: err %v resp %#v", err, resp)
 	}
@@ -704,7 +720,7 @@ func TestDelegation_DoAs(t *testing.T) {
 		t.Fatalf("issue for oneself: %#v", resp.Data)
 	}
 	resp, err = h.login(resp.Data["token"].(string), nil)
-	if err != nil || resp == nil || resp.Auth == nil || resp.Auth.Metadata["real_user"] != "" {
+	if err != nil || resp == nil || resp.Auth == nil || resp.Auth.Metadata["real_user"] != "" || !reflect.DeepEqual(resp.Auth.Policies, []string{"hive-keys"}) {
 		t.Fatalf("login for oneself: err %v resp %#v", err, resp)
 	}
 
@@ -714,7 +730,7 @@ func TestDelegation_DoAs(t *testing.T) {
 	writeProxy(t, h.b, h.storage, "hive", map[string]interface{}{"bound_principals": "hive/other.example.com@" + testRealm})
 	resp, err = h.login(urlString, nil)
 	assertDenied(t, "login after rebinding the proxy", resp, err, logical.ErrPermissionDenied, "may no longer impersonate")
-	h.writeProxy()
+	h.resetHiveProxy()
 	if resp, err := h.login(urlString, nil); err != nil || resp == nil || resp.Auth == nil {
 		t.Fatalf("login after binding the proxy back: err %v resp %#v", err, resp)
 	}
@@ -725,7 +741,7 @@ func TestDelegation_DoAs(t *testing.T) {
 
 func TestDelegation_DoAsRejections(t *testing.T) {
 	h := newDelegationHarness(t)
-	h.writeProxy()
+	h.resetHiveProxy()
 	writeProxy(t, h.b, h.storage, "oozie", map[string]interface{}{
 		"bound_principals":   "oozie/*@" + testRealm,
 		"allowed_principals": "bob@" + testRealm,
@@ -770,7 +786,21 @@ func TestDelegation_DoAsRejections(t *testing.T) {
 	writeProxy(t, h.b, h.storage, "hive", map[string]interface{}{"bound_cidrs": "192.0.2.0/24,10.1.0.0/16"})
 	h.issue(hive, map[string]interface{}{"doas": "alice"})
 	mustRequest(t, h.b, h.storage, logical.DeleteOperation, "proxy/hive-bob", nil)
-	h.writeProxy()
+
+	// Any proxy allowing both principals may admit the address, not only the
+	// first one; the token records which did.
+	writeProxy(t, h.b, h.storage, "hive", map[string]interface{}{"bound_cidrs": "192.0.2.0/24"})
+	writeProxy(t, h.b, h.storage, "hive-dc1", map[string]interface{}{
+		"bound_principals":   "hive/*@" + testRealm,
+		"allowed_principals": "alice@" + testRealm,
+		"bound_cidrs":        "10.1.0.0/16",
+	})
+	seq := h.issue(hive, map[string]interface{}{"doas": "alice"}).Data["sequence_number"].(int32)
+	if entry, err := h.b.delegationTokenEntry(context.Background(), h.storage, seq); err != nil || entry == nil || entry.Proxy != "hive-dc1" {
+		t.Fatalf("token record: err %v entry %+v", err, entry)
+	}
+	mustRequest(t, h.b, h.storage, logical.DeleteOperation, "proxy/hive-dc1", nil)
+	h.resetHiveProxy()
 
 	// The caller's roles do not matter: here the service is bound both to a
 	// role of its own and to one covering the whole realm.
@@ -858,7 +888,7 @@ func TestDelegation_DoAsPrincipal(t *testing.T) {
 	for _, doas := range []string{
 		"", "@" + testRealm, "alice@", "alice@corp.example.com@", "/x", "x/", "x//y",
 		" alice", "alice ", "al ice", "alice\n", "al\x00ice", "al\u200bice", "al\xffice",
-		"*", "a,b", strings.Repeat("a", maxDoasLength+1),
+		"*", "a,b", strings.Repeat("a", maxParamLength+1),
 	} {
 		if got, err := doasPrincipal(doas, testRealm); err == nil {
 			t.Errorf("doasPrincipal(%q) = %q; want an error", doas, got)

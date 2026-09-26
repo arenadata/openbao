@@ -725,9 +725,10 @@ issues a token owned by the caller, so a client should check `owner` and
 - `renewer` `(string: "")` – Name allowed to renew the token, compared with
   the renewing principal's full name and, when that principal is in the
   realm of the one issuing the token, with its `primary/instance` and its
-  primary alone. Empty makes the token non-renewable.
-- `service` `(string: "")` – Hadoop token service written into the token.
-  Not interpreted by OpenBao.
+  primary alone. At most 1024 bytes, without spaces. Empty makes the token
+  non-renewable.
+- `service` `(string: "")` – Hadoop token service written into the token,
+  at most 1024 bytes. Not interpreted by OpenBao.
 - `max_lifetime` `(duration: "")` – Requested hard lifetime, capped by the
   configured `max_lifetime`.
 - `role` `(string: "")` – Role to issue the token for. Without it every role
@@ -821,8 +822,9 @@ $ curl \
 
 Removes the token; it can no longer log in or be renewed. The
 SPNEGO-authenticated caller must be the token's owner, its renewer, or a
-principal that a proxy lets impersonate the owner from the caller's address. OpenBao tokens already issued from it are not revoked but cannot be
-renewed.
+principal that a proxy lets impersonate the owner from the caller's
+address. OpenBao tokens already issued from it are not revoked but cannot
+be renewed.
 
 #### Parameters
 
@@ -909,24 +911,27 @@ $ curl \
 | `POST` | `/auth/kerberos/proxy/:name` |
 
 A proxy lets principals issue delegation tokens owned by other principals
-with `doas`, the counterpart of `hadoop.proxyuser.<name>.*`. A request is
-granted when one proxy matches the caller in `bound_principals`, the owner
-in `allowed_principals` and the caller's address in `bound_cidrs`. Proxies
-are independent of roles. Parameters not sent keep their current value.
+with `doas`, the counterpart of `hadoop.proxyuser.<name>.users` and
+`.hosts`; `.groups` has none. A request is granted when one proxy matches
+the caller in `bound_principals`, the owner in `allowed_principals` and the
+caller's address in `bound_cidrs`. Proxies are independent of roles.
+Parameters not sent keep their current value; unknown parameters are
+rejected.
 
 #### Parameters
 
 - `name` `(string: <required>)` – The name of the proxy.
 - `bound_principals` `(array: <required>)` – Patterns matched against the
-  full principal name of the caller, like the `bound_principals` of a role.
-  Each entry needs a realm or a `*`. Empty entries are dropped.
+  full principal name of the caller. Each entry needs a realm after its last
+  `@`, `*` for any realm; `*` is the only wildcard and also matches `/` and
+  `@`. Empty entries are dropped.
 - `allowed_principals` `(array: <required>)` – Patterns matched against the
-  full principal name of the token owner, the counterpart of
-  `hadoop.proxyuser.<name>.users`. Each entry needs a realm or a `*`. Empty
-  entries are dropped.
-- `bound_cidrs` `(array: [])` – CIDR blocks or IP addresses the caller must
-  connect from, the counterpart of `hadoop.proxyuser.<name>.hosts`. Host
-  names are not accepted. Empty allows any address.
+  full principal name of the token owner, written like `bound_principals`.
+  Empty entries are dropped.
+- `bound_cidrs` `(array: [])` – IP addresses or CIDR blocks the caller must
+  connect from. Host names, ports and IPv4-mapped IPv6 addresses are not
+  accepted. Empty allows any address, whereas Hadoop refuses impersonation
+  while `.hosts` is unset.
 
 #### Sample payload
 
@@ -955,7 +960,7 @@ $ curl \
 | `DELETE` | `/auth/kerberos/proxy/:name` |
 
 Tokens issued through the proxy stop logging in and renewing unless another
-proxy allows them.
+proxy allows them, whatever its `bound_cidrs`.
 
 #### Parameters
 

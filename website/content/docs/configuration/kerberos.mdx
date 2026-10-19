@@ -1,0 +1,81 @@
+---
+sidebar_label: kerberos
+description: |-
+  The kerberos stanza configures the Kerberos credentials OpenBao uses to
+  authenticate to PostgreSQL servers.
+---
+
+# `kerberos` stanza
+
+The `kerberos` stanza configures the credentials OpenBao presents when a
+PostgreSQL server requests GSSAPI (Kerberos) authentication. It applies to
+every PostgreSQL connection made by the server process: the
+[PostgreSQL storage backend](storage/postgresql.mdx) and the connections of
+the built-in [PostgreSQL database secrets engine plugin](../secrets/databases/postgresql.mdx).
+With this stanza, the connection strings of those connections do not need a
+password.
+
+```hcl
+kerberos {
+  principal   = "openbao@EXAMPLE.COM"
+  keytab_file = "/etc/openbao/openbao.keytab"
+}
+```
+
+Both parameters can also be given with the `-kerberos-principal` and
+`-kerberos-keytab-file` flags of [`bao server`](../commands/server.mdx), or
+with the `BAO_KERBEROS_PRINCIPAL` and `BAO_KERBEROS_KEYTAB_FILE` environment
+variables. Flags and environment variables take precedence over the stanza.
+
+## `kerberos` parameters
+
+- `principal` `(string: <required>)` – The Kerberos principal OpenBao
+  authenticates as, for example `openbao@EXAMPLE.COM`. When the realm is
+  omitted, the `default_realm` of the krb5 configuration is used.
+
+- `keytab_file` `(string: <required>)` – Path to the keytab holding the keys
+  of `principal`. The file is read once at startup and must be readable by the
+  OpenBao process only.
+
+## Behavior
+
+- The krb5 configuration is read from the file named by the `KRB5_CONFIG`
+  environment variable, or `/etc/krb5.conf`. It provides the default realm
+  and the KDC addresses.
+
+- The keytab and the krb5 configuration are loaded at startup. When either is
+  unusable, the error is logged and reported by every PostgreSQL connection
+  that requests GSSAPI authentication. The KDC is contacted when the first
+  connection is established, and tickets are renewed automatically.
+
+- The stanza is applied again on `SIGHUP` (`kill -HUP <pid>`): the keytab is
+  read again, so rotated keys are picked up without a restart. When the new
+  credentials cannot be loaded, the previously loaded ones remain in use and
+  the error is logged. Removing the stanza drops the credentials. Flags and
+  environment variables keep taking precedence over the stanza on reload.
+
+- The Kerberos service name defaults to `postgres`. It can be changed per
+  connection with the `krbsrvname` connection string parameter, or the
+  service principal can be set explicitly with `krbspn`.
+
+- The PostgreSQL role is taken from the user of the connection string, as
+  usual. The server must allow that role for the principal: with
+  `include_realm=0`, the principal `openbao@EXAMPLE.COM` is mapped to the
+  role `openbao`; other mappings can be configured in `pg_ident.conf`.
+
+- The stanza does not apply to external database plugins, which run as
+  separate processes.
+
+## Example PostgreSQL configuration
+
+`pg_hba.conf`:
+
+```
+host  all  openbao  10.0.0.0/8  gss  include_realm=0  krb_realm=EXAMPLE.COM
+```
+
+The connection string then names the role only:
+
+```
+postgresql://openbao@db.example.com:5432/openbao
+```

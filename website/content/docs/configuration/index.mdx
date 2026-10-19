@@ -160,6 +160,9 @@ to specify where the configuration is.
 - `telemetry` <code>([Telemetry][telemetry]: &lt;none&gt;)</code> – Specifies the telemetry
   reporting system.
 
+- `kerberos` <code>([Kerberos][kerberos]: &lt;none&gt;)</code> – Specifies the Kerberos
+  credentials used to authenticate to PostgreSQL servers.
+
 - `default_lease_ttl` `(string: "768h")` <a name="default_lease_ttl"></a> – Specifies the default lease duration
   for tokens and secrets. This is specified using a label suffix like `"30s"` or
   `"1h"`. This value cannot be larger than `max_lease_ttl`.
@@ -291,6 +294,7 @@ The following parameters are used on backends that support [High Availability][h
 [listener]: listener/index.mdx
 [seal]: seal/index.mdx
 [telemetry]: telemetry.mdx
+[kerberos]: kerberos.mdx
 [initialize]: self-init.mdx
 [high-availability]: ../concepts/ha.mdx
 [plugins]: ../plugins/index.mdx

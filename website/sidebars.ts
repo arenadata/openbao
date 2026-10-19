@@ -131,6 +131,7 @@ const sidebars: SidebarsConfig = {
                         "configuration/storage/postgresql",
                     ],
                 },
+                "configuration/kerberos",
                 "configuration/plugins",
                 "configuration/telemetry",
                 "configuration/ui",

@@ -57,6 +57,9 @@ to disable SSL.
   [including `PGHOST`](https://www.postgresql.org/docs/current/libpq-envars.html);
   see [`pgconn.ParseConfig(...)`](https://pkg.go.dev/github.com/jackc/pgconn)
   for more information. This configuration option may be blank.
+  When the server is configured with a [`kerberos` stanza](../kerberos.mdx) and
+  PostgreSQL requests GSSAPI authentication, the server's Kerberos credentials are used
+  and the connection string does not need a password.
 
 - `table` `(string: "openbao_kv_store")` – Specifies the name of the table in
   which to write OpenBao data. OpenBao will attempt to create it if missing and

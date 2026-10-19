@@ -90,6 +90,16 @@ flags](index.mdx) included on all commands.
   number of older log file archives to keep. Defaults to 0 (no files are ever deleted).
   Set to -1 to discard old log files when a new one is created.
 
+- `-kerberos-principal` `(string: "")` - Kerberos principal used to authenticate
+  to PostgreSQL servers, for example `openbao@EXAMPLE.COM`. Overrides `principal`
+  of the [`kerberos` stanza](../configuration/kerberos.mdx). This can also be
+  specified via the `BAO_KERBEROS_PRINCIPAL` environment variable.
+
+- `-kerberos-keytab-file` `(string: "")` - Path to the keytab holding the keys
+  of the Kerberos principal. Overrides `keytab_file` of the
+  [`kerberos` stanza](../configuration/kerberos.mdx). This can also be
+  specified via the `BAO_KERBEROS_KEYTAB_FILE` environment variable.
+
 - `BAO_ALLOW_PENDING_REMOVAL_MOUNTS` `(bool: false)` <a name="bao_allow_pending_removal_mounts"></a> - (environment variable)
   Allow OpenBao to be started with builtin engines which have the "Pending Removal"
   deprecation state. This is a temporary stopgap in place in order to perform an

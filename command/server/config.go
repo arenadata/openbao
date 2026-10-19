@@ -56,6 +56,10 @@ type Config struct {
 
 	ServiceRegistration *ServiceRegistration `hcl:"-"`
 
+	// Kerberos configures the credentials used by the PostgreSQL connections
+	// of the server process when the server requests GSSAPI authentication.
+	Kerberos *Kerberos `hcl:"-"`
+
 	CacheSize                int         `hcl:"cache_size"`
 	DisableCache             bool        `hcl:"-"`
 	DisableCacheRaw          interface{} `hcl:"disable_cache"`
@@ -160,6 +164,9 @@ func (c *Config) Validate(sourceFilePath string) []configutil.ConfigError {
 	}
 	if c.ServiceRegistration != nil {
 		results = append(results, c.ServiceRegistration.Validate(sourceFilePath)...)
+	}
+	if c.Kerberos != nil {
+		results = append(results, c.Kerberos.Validate(sourceFilePath)...)
 	}
 	for _, l := range c.Listeners {
 		results = append(results, l.Validate(sourceFilePath)...)
@@ -301,6 +308,23 @@ func (b *ServiceRegistration) Validate(source string) []configutil.ConfigError {
 
 func (b *ServiceRegistration) GoString() string {
 	return fmt.Sprintf("*%#v", *b)
+}
+
+// Kerberos is the optional Kerberos client configuration of the server, used
+// by PostgreSQL connections (storage backend and database secrets engine).
+type Kerberos struct {
+	UnusedKeys configutil.UnusedKeyMap `hcl:",unusedKeyPositions"`
+
+	Principal  string `hcl:"principal"`
+	KeytabFile string `hcl:"keytab_file"`
+}
+
+func (k *Kerberos) Validate(source string) []configutil.ConfigError {
+	return configutil.ValidateUnusedFields(k.UnusedKeys, source)
+}
+
+func (k *Kerberos) GoString() string {
+	return fmt.Sprintf("*%#v", *k)
 }
 
 // PluginConfig represents the configuration for a single OCI-based plugin
@@ -494,6 +518,11 @@ func (c *Config) Merge(c2 *Config) *Config {
 	result.ServiceRegistration = c.ServiceRegistration
 	if c2.ServiceRegistration != nil {
 		result.ServiceRegistration = c2.ServiceRegistration
+	}
+
+	result.Kerberos = c.Kerberos
+	if c2.Kerberos != nil {
+		result.Kerberos = c2.Kerberos
 	}
 
 	result.CacheSize = c.CacheSize
@@ -1002,6 +1031,13 @@ func ParseConfig(d, source string) (*Config, error) {
 		}
 	}
 
+	if o := list.Filter("kerberos"); len(o.Items) > 0 {
+		delete(result.UnusedKeys, "kerberos")
+		if err := parseKerberos(result, o, "kerberos"); err != nil {
+			return nil, fmt.Errorf("error parsing 'kerberos': %w", err)
+		}
+	}
+
 	// Parse self-initialization stanzas.
 	if o := list.Filter("initialize"); len(o.Items) > 0 {
 		delete(result.UnusedKeys, "initialize")
@@ -1334,6 +1370,27 @@ func parseServiceRegistration(result *Config, list *ast.ObjectList, name string)
 	return nil
 }
 
+func parseKerberos(result *Config, list *ast.ObjectList, name string) error {
+	if len(list.Items) > 1 {
+		return fmt.Errorf("only one %q block is permitted", name)
+	}
+
+	var k Kerberos
+	if err := hcl.DecodeObject(&k, list.Items[0].Val); err != nil {
+		return multierror.Prefix(err, name+":")
+	}
+
+	if k.Principal == "" {
+		return fmt.Errorf("%s: 'principal' is required", name)
+	}
+	if k.KeytabFile == "" {
+		return fmt.Errorf("%s: 'keytab_file' is required", name)
+	}
+
+	result.Kerberos = &k
+	return nil
+}
+
 // Sanitized returns a copy of the config with all values that are considered
 // sensitive stripped. It also strips all `*Raw` values that are mainly
 // used for parsing.
@@ -1400,6 +1457,13 @@ func (c *Config) Sanitized() map[string]interface{} {
 	}
 	for k, v := range sharedResult {
 		result[k] = v
+	}
+
+	if c.Kerberos != nil {
+		result["kerberos"] = map[string]interface{}{
+			"principal":   c.Kerberos.Principal,
+			"keytab_file": c.Kerberos.KeytabFile,
+		}
 	}
 
 	// Sanitize storage stanza
